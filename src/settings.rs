@@ -22,6 +22,9 @@ pub struct Settings {
     /// Draw covers outside Now Playing and Stage in the theme's colours (off by default).
     #[serde(default)]
     pub paint_covers: bool,
+    /// Smooth mixes on radios and mixes (off by default) and its length.
+    #[serde(default)]
+    pub mixes: crate::model::Mixes,
 }
 
 impl Settings {

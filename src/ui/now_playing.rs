@@ -307,6 +307,9 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 if remove.is_some_and(|b| b.on_hover_text("Remove from queue").clicked()) {
                     actions.push(Action::Command(Command::RemoveFromQueue(i)));
                 }
+                if !is_current {
+                    super::audition::hook(ui, &response, track, thumb, false, p, actions);
+                }
                 if named(response, &track.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()

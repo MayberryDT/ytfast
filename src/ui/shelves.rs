@@ -307,6 +307,9 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
     if let (true, Some(track)) = (resting(ui, &response), &item.track) {
         actions.push(Action::Prepare(track.video_id.clone()));
     }
+    if let Some(track) = &item.track {
+        super::audition::hook(ui, &response, track, art, round, p, actions);
+    }
     if response.clicked() {
         if let Some(url) = &item.thumbnail {
             motion::launch_to(ui.ctx(), url, art, radius, destination(item, play_hit));
@@ -453,6 +456,9 @@ pub(super) fn row(
     if let (true, Some(track)) = (resting(ui, &response), &item.track) {
         actions.push(Action::Prepare(track.video_id.clone()));
     }
+    if let Some(track) = &item.track {
+        super::audition::hook(ui, &response, track, thumb, false, p, actions);
+    }
     if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
@@ -540,6 +546,10 @@ fn top_result(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mu
                 #[cfg(feature = "e2e")]
                 if item.track.is_some() {
                     crate::e2e::register(ui.ctx(), &format!("Play {}", item.title), rect);
+                }
+                if let Some(track) = &item.track {
+                    let round = item.kind == ItemKind::Artist;
+                    super::audition::hook(ui, &response, track, rect, round, p, actions);
                 }
                 if named(response, &item.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)

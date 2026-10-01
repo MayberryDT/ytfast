@@ -7,9 +7,13 @@
 //! the stamp they were started under, so a late answer never acts on newer
 //! state: `generation` changes with the current track, `epoch` with the
 //! queue (each play request), and mpv's playlist entry ids tell the current
-//! file's events from those of replaced or queued ones.
+//! file's events from those of replaced or queued ones. Several mpv
+//! processes can run at once (Smooth mixes, Audition: see [`deck`]); their
+//! events carry the process's serial and reach the deck's current role.
 
 mod account;
+mod audition;
+mod deck;
 mod pages;
 mod playback;
 mod queue;
@@ -119,6 +123,21 @@ pub enum Command {
     Heat(String),
     /// Settings: theme-painted covers on or off (saved for next time).
     PaintCovers(bool),
+    /// Audition: preview `track` over the ducked current song, from `start`
+    /// seconds in (its best part; `None` plays from a third of the way in),
+    /// until [`Command::EndAudition`]. Holding another song switches to it.
+    /// Never touches the queue, the session or history.
+    Audition {
+        track: Track,
+        start: Option<f64>,
+    },
+    /// The held song was let go: it fades out and the current song comes back.
+    EndAudition,
+    /// Settings: Smooth mixes on radios and mixes, and their length.
+    Mixes(crate::model::Mixes),
+    /// E2E: read every deck's volume and position back five times a second.
+    #[cfg(feature = "e2e")]
+    SampleDecks(bool),
 }
 
 pub enum Event {
@@ -320,6 +339,8 @@ enum Internal {
     EqualizerSettled {
         stamp: u64,
     },
+    /// Audition and Smooth mixes: the volume clock, previews' streams.
+    Deck(deck::Message),
 }
 
 /// The track queued in mpv behind the current one.
@@ -341,8 +362,10 @@ struct Worker {
     sink: Sink,
     internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: Option<mpsc::UnboundedReceiver<Internal>>,
-    mpv_tx: mpsc::UnboundedSender<MpvEvent>,
-    mpv_rx: Option<mpsc::UnboundedReceiver<MpvEvent>>,
+    /// Events of every mpv process, tagged with its serial.
+    mpv_tx: mpsc::UnboundedSender<(u64, MpvEvent)>,
+    mpv_rx: Option<mpsc::UnboundedReceiver<(u64, MpvEvent)>>,
+    /// The main deck: the current song plays on it.
     mpv: Option<Arc<Mpv>>,
     last_connect: Option<Instant>,
     last_death: Option<Instant>,
@@ -381,7 +404,7 @@ struct Worker {
     asked: Instant,
     /// Loudness and play tracking from player responses, by video id.
     players: HashMap<String, sound::PlayerInfo>,
-    /// The `af` value mpv has.
+    /// The `af` value every deck has.
     af: String,
     /// Bumped by every equalizer change.
     eq_stamp: u64,
@@ -390,6 +413,8 @@ struct Worker {
     /// The sleep timer's fade: the share of the volume playing (1 = none).
     fade: f64,
     last_save: Instant,
+    /// The other decks: Smooth mixes and Audition.
+    decks: deck::Decks,
 }
 
 impl Worker {
@@ -425,6 +450,7 @@ impl Worker {
                 autoplay: true,
                 normalize: settings.normalizes(),
                 equalizer: settings.equalizer,
+                mixes: settings.mixes,
                 ..Playback::default()
             },
             last_emit: Instant::now(),
@@ -440,6 +466,7 @@ impl Worker {
             sleep_stamp: Arc::default(),
             fade: 1.0,
             last_save: Instant::now(),
+            decks: deck::Decks::new(settings.mixes),
         }
     }
 
@@ -459,7 +486,7 @@ impl Worker {
                     None => break,
                 },
                 Some(message) = internal.recv() => self.internal(message).await,
-                Some(event) = mpv_events.recv() => self.mpv_event(event).await,
+                Some((serial, event)) = mpv_events.recv() => self.deck_event(serial, event).await,
                 Some(done) = shutdown.recv() => {
                     self.save_session(true);
                     let _ = done.send(());
@@ -551,6 +578,7 @@ impl Worker {
             }
             Command::PlayTarget(target) => {
                 let epoch = self.new_epoch();
+                self.decks.radio = deck::is_radio(&target);
                 self.state.loading = true;
                 self.emit(true);
                 let client = self.client.clone();
@@ -599,7 +627,11 @@ impl Worker {
             Command::TogglePause => {
                 if self.state.loading {
                     // Resolving: nothing to pause yet.
-                } else if let (Some(mpv), false) = (&self.mpv, self.idle) {
+                } else if let (Some(mpv), false) = (self.mpv.clone(), self.idle) {
+                    if self.state.playing {
+                        // Pausing in a blend ends it: the new song pauses alone.
+                        self.finish_blend().await;
+                    }
                     let _ = mpv.set("pause", json!(self.state.playing)).await;
                 } else if let Some(pos) = self.pos {
                     // Nothing loaded (a restored session, the queue ended, or
@@ -619,11 +651,7 @@ impl Worker {
             Command::Seek(seconds) => self.seek(seconds).await,
             Command::Volume(volume) => {
                 self.state.volume = volume.clamp(0.0, 100.0);
-                if let Some(mpv) = &self.mpv {
-                    let _ = mpv
-                        .set("volume", json!(self.state.volume * self.fade))
-                        .await;
-                }
+                self.apply_volumes().await;
                 self.emit(true);
                 self.save_session(false);
             }
@@ -648,6 +676,7 @@ impl Worker {
                     Repeat::One => Repeat::Off,
                 };
                 self.apply_loop().await;
+                self.requeue_next().await;
                 self.emit(true);
                 self.save_session(true);
             }
@@ -740,6 +769,11 @@ impl Worker {
             Command::SleepTimer(choice) => self.set_sleep(choice).await,
             Command::Equalizer(equalizer) => self.set_equalizer(equalizer).await,
             Command::Normalize(on) => self.set_normalize(on).await,
+            Command::Audition { track, start } => self.audition(track, start).await,
+            Command::EndAudition => self.end_audition().await,
+            Command::Mixes(mixes) => self.set_mixes(mixes).await,
+            #[cfg(feature = "e2e")]
+            Command::SampleDecks(on) => self.sample_decks(on),
         }
     }
 
@@ -749,7 +783,7 @@ impl Worker {
             return;
         }
         self.last_emit = Instant::now();
-        self.state.next_ready = self.appended.is_some();
+        self.state.next_ready = self.appended.is_some() || self.decks.cued.is_some();
         self.sink.send(Event::Playback(self.state.clone()));
     }
 }

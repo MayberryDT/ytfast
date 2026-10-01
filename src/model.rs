@@ -322,6 +322,42 @@ pub struct Playback {
     /// The loudness gain applied to the current song, in dB, once known.
     pub gain: Option<f64>,
     pub equalizer: crate::equalizer::Equalizer,
+    /// The song auditioned over the ducked current one, while one is held.
+    pub audition: Option<Audition>,
+    /// Smooth mixes: radios and mixes crossfade between songs.
+    pub mixes: Mixes,
+}
+
+/// A song held under the pointer and previewed (Audition).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Audition {
+    pub video_id: String,
+    /// Its audio is coming out; until then it is being prepared.
+    pub playing: bool,
+}
+
+/// The Smooth mixes setting: on radios, mixes and autoplay, the next song
+/// starts `seconds` before the current one ends, with an equal-power
+/// crossfade. Albums and other playlists stay gapless.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mixes {
+    pub on: bool,
+    pub seconds: u8,
+}
+
+impl Mixes {
+    pub const SHORTEST: u8 = 3;
+    pub const LONGEST: u8 = 12;
+}
+
+impl Default for Mixes {
+    fn default() -> Self {
+        Self {
+            on: false,
+            seconds: 6,
+        }
+    }
 }
 
 /// Parses "3:45" or "1:02:03" into seconds.

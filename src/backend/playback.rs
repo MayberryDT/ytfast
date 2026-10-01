@@ -7,6 +7,8 @@ impl super::Worker {
         self.extending = false;
         self.advance_pending = false;
         self.waiting_for_network = false;
+        self.decks.radio = false;
+        self.decks.autoplay.clear();
         self.epoch
     }
 
@@ -101,6 +103,9 @@ impl super::Worker {
         self.queue.reached(pos);
         self.current_entry = None;
         self.appended = None;
+        // A blend in progress ends, and a song cued on the second deck goes.
+        self.finish_blend().await;
+        self.drop_cued().await;
         self.retried = false;
         self.reported = false;
         self.waiting_for_network = false;
@@ -184,7 +189,13 @@ impl super::Worker {
         let Some(entry) = self.queue.get(pos + 1) else {
             return;
         };
-        if self.appended.as_ref().is_some_and(|a| a.id == entry.id) {
+        if self.appended.as_ref().is_some_and(|a| a.id == entry.id)
+            || self
+                .decks
+                .cued
+                .as_ref()
+                .is_some_and(|c| c.next.id == entry.id)
+        {
             return;
         }
         let (id, video_id) = (entry.id, entry.track.video_id.clone());
@@ -226,7 +237,7 @@ impl super::Worker {
         if self.mpv.is_none() {
             match Mpv::spawn(
                 &self.paths.runtime.join("mpv.sock"),
-                self.state.volume * self.fade,
+                self.main_volume(),
                 self.mpv_tx.clone(),
             )
             .await
@@ -255,7 +266,18 @@ impl super::Worker {
             self.sleep_after_song().await;
             return;
         }
+        if !automatic && self.decks.blending() {
+            // A manual Next during a blend completes it at once.
+            self.finish_blend().await;
+            return;
+        }
         if pos + 1 < self.queue.len() {
+            if let Some(cued) = &self.decks.cued
+                && self.queue.position(cued.next.id) == Some(pos + 1)
+            {
+                self.swap(0.0).await;
+                return;
+            }
             if let (Some(appended), Some(mpv), false) = (&self.appended, &self.mpv, self.idle)
                 && self.queue.position(appended.id) == Some(pos + 1)
             {
@@ -283,6 +305,7 @@ impl super::Worker {
 
     pub(super) async fn seek(&mut self, seconds: f64) {
         let seconds = seconds.max(0.0);
+        self.finish_blend().await;
         if let (Some(mpv), Some(_)) = (&self.mpv, self.current_entry) {
             let _ = mpv.command(json!(["seek", seconds, "absolute"])).await;
             self.state.position = seconds;
@@ -303,6 +326,7 @@ impl super::Worker {
         {
             let _ = mpv.command(json!(["playlist-remove", 1])).await;
         }
+        self.drop_cued().await;
     }
 
     /// Autoplay: when the last track in the queue is playing, fetch a radio
@@ -419,9 +443,18 @@ impl super::Worker {
                 if generation != self.generation
                     || !still_next
                     || self.appended.is_some()
+                    || self.decks.cued.is_some()
                     || self.current_entry.is_none()
                     || self.sleeping_at_song_end()
                 {
+                    return;
+                }
+                if self.blends_into(id) {
+                    // Smooth mixes: it waits on the second deck, which is
+                    // busy until a blend in progress ends (that queues it again).
+                    if !self.decks.blending() {
+                        self.cue(id, &video_id, &stream).await;
+                    }
                     return;
                 }
                 let (options, gain) = self.file_options(&video_id, &stream, None);
@@ -489,6 +522,13 @@ impl super::Worker {
                         .filter(|t| !known.contains(&t.video_id))
                         .collect(),
                 );
+                if autoplay {
+                    // Autoplay continues as a radio: its songs blend in.
+                    let ids: Vec<u64> = (first_new..self.queue.len())
+                        .filter_map(|p| self.queue.id(p))
+                        .collect();
+                    self.decks.autoplay.extend(ids);
+                }
                 self.send_queue();
                 if play_now && first_new < self.queue.len() {
                     self.start(first_new).await;
@@ -496,7 +536,7 @@ impl super::Worker {
                     self.state.loading = false;
                     self.state.playing = false;
                     self.emit(true);
-                } else if self.appended.is_none() {
+                } else if self.appended.is_none() && self.decks.cued.is_none() {
                     self.prefetch();
                 }
             }
@@ -549,6 +589,7 @@ impl super::Worker {
             Internal::Player { video_id, info } => self.player_arrived(video_id, info).await,
             Internal::SleepTick { stamp } => self.sleep_tick(stamp).await,
             Internal::EqualizerSettled { stamp } => self.equalizer_settled(stamp).await,
+            Internal::Deck(message) => self.deck_message(message).await,
         }
     }
 
@@ -595,6 +636,44 @@ impl super::Worker {
         });
     }
 
+    /// The song after the current one (`next`, queued gapless in mpv or
+    /// cued on the second deck) started and is now the current one.
+    pub(super) async fn advanced(&mut self, next: Appended) {
+        let Some(pos) = self.queue.position(next.id) else {
+            // Removed from the queue as it started: move on (boxed: Next can
+            // start a song cued on the second deck, which comes back here).
+            Box::pin(self.next(true)).await;
+            return;
+        };
+        self.generation += 1;
+        self.pos = Some(pos);
+        self.queue.reached(pos);
+        self.retried = false;
+        self.reported = false;
+        let track = self.track_at(pos).cloned();
+        self.state.index = Some(pos);
+        self.state.position = 0.0;
+        self.state.duration = track
+            .as_ref()
+            .and_then(|t| t.duration)
+            .map(f64::from)
+            .unwrap_or(0.0);
+        self.state.format = Some(resolver::describe(next.itag));
+        self.state.gain = next.gain;
+        self.state.lyrics = None;
+        self.state.related = None;
+        self.emit(true);
+        if let Some(track) = track {
+            self.fetch_watch_info(&track.video_id);
+            self.fetch_player(&track.video_id);
+        }
+        self.prefetch();
+        self.maybe_extend();
+        self.save_session(true);
+        #[cfg(feature = "e2e")]
+        self.probe_gain();
+    }
+
     pub(super) async fn mpv_event(&mut self, event: MpvEvent) {
         match event {
             MpvEvent::Property { name, data } => match name.as_str() {
@@ -604,6 +683,10 @@ impl super::Worker {
                         return;
                     };
                     self.state.position = position;
+                    if self.deck_position().await {
+                        // The next song took over on the second deck.
+                        return;
+                    }
                     if !self.reported && position >= 10.0 {
                         self.reported = true;
                         self.report_play();
@@ -660,38 +743,7 @@ impl super::Worker {
                         if let Some(mpv) = &self.mpv {
                             let _ = mpv.command(json!(["playlist-remove", 0])).await;
                         }
-                        let Some(pos) = self.queue.position(appended.id) else {
-                            // Removed from the queue as it started: move on.
-                            self.next(true).await;
-                            return;
-                        };
-                        self.generation += 1;
-                        self.pos = Some(pos);
-                        self.queue.reached(pos);
-                        self.retried = false;
-                        self.reported = false;
-                        let track = self.track_at(pos).cloned();
-                        self.state.index = Some(pos);
-                        self.state.position = 0.0;
-                        self.state.duration = track
-                            .as_ref()
-                            .and_then(|t| t.duration)
-                            .map(f64::from)
-                            .unwrap_or(0.0);
-                        self.state.format = Some(resolver::describe(appended.itag));
-                        self.state.gain = appended.gain;
-                        self.state.lyrics = None;
-                        self.state.related = None;
-                        self.emit(true);
-                        if let Some(track) = track {
-                            self.fetch_watch_info(&track.video_id);
-                            self.fetch_player(&track.video_id);
-                        }
-                        self.prefetch();
-                        self.maybe_extend();
-                        self.save_session(true);
-                        #[cfg(feature = "e2e")]
-                        self.probe_gain();
+                        self.advanced(appended).await;
                     }
                 }
                 _ => {}

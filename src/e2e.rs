@@ -82,6 +82,15 @@ fn probed(key: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// When the run's clock started, so samples taken in the backend line up
+/// with the scenario's own marks.
+static CLOCK: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+/// Milliseconds on the run's clock.
+pub fn clock_ms() -> u64 {
+    CLOCK.elapsed().as_millis() as u64
+}
+
 fn page_tracks(app: &App) -> Vec<String> {
     app.page_state(&app.view.target())
         .and_then(|s| s.page.as_ref())
@@ -109,6 +118,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "engine" => engine(),
         "engine-restore" => engine_restore(),
         "surfaces" => surfaces(),
+        "deck" => deck(),
         _ => journey(),
     }
 }
@@ -829,6 +839,9 @@ enum Step {
     /// Asks the window for something, as the user or compositor would.
     Window(&'static str, egui::ViewportCommand),
     Key(egui::Key),
+    /// Holds modifier keys down from now on (as held keys report them);
+    /// `Modifiers::NONE` lets go.
+    Hold(egui::Modifiers),
     Screenshot(&'static str),
     Measure {
         name: &'static str,
@@ -2937,6 +2950,482 @@ fn surfaces() -> Vec<Step> {
     steps
 }
 
+// ---- deck: Audition and Smooth mixes ----
+
+/// What the backend read back from every deck, five times a second.
+fn deck_samples() -> Vec<Value> {
+    match probed("decks") {
+        Value::Array(list) => list,
+        _ => Vec::new(),
+    }
+}
+
+/// Notes the run's clock under `key`, to line deck samples up with steps.
+fn clock_mark(key: &'static str) -> Step {
+    run(key, move |_| probe(key, json!(clock_ms())))
+}
+
+fn clock_at(key: &str) -> Option<u64> {
+    probed(key).as_u64()
+}
+
+fn sample_ms(sample: &Value) -> u64 {
+    sample["ms"].as_u64().unwrap_or(0)
+}
+
+/// A deck's amplitude as a share of the user's volume (mpv's volume
+/// property is cubic in amplitude).
+fn amplitude(sample: &Value, role: &str) -> Option<f64> {
+    let volume = sample["volume"].as_f64().filter(|v| *v > 0.0)?;
+    Some((sample[role]["volume"].as_f64()? / volume).powi(3))
+}
+
+fn rising(values: &[f64], slack: f64) -> bool {
+    values.windows(2).all(|w| w[1] >= w[0] - slack)
+}
+
+fn queue_state(app: &App) -> Value {
+    json!({"queue": queue_ids(app), "index": app.playback.index})
+}
+
+/// A song on screen, prepared ahead, other than the one playing.
+fn audition_candidate(app: &App) -> Option<&crate::model::Item> {
+    let playing = noted("deck:main", "id");
+    page_items(app)
+        .into_iter()
+        .skip(1)
+        .take(6)
+        .find(|i| Some(item_id(i)) != playing && app.backend.prepared(&item_id(i)))
+}
+
+/// The audition, read back from the decks: the main deck's volume before,
+/// during and after, both songs' positions, and the queue.
+fn audition_report() -> Value {
+    let samples = deck_samples();
+    let (Some(hold), Some(release)) = (clock_at("deck:hold"), clock_at("deck:release")) else {
+        return json!({"ok": false, "why": "the hold was not marked"});
+    };
+    let held = noted("deck:held", "id");
+    let playing_at = samples
+        .iter()
+        .find(|s| {
+            sample_ms(s) >= hold
+                && s["held"]["playing"] == json!(true)
+                && s["held"]["id"].as_str() == held.as_deref()
+        })
+        .map(sample_ms);
+    let between = |from: u64, to: u64| {
+        samples
+            .iter()
+            .filter(move |s| (from..to).contains(&sample_ms(s)))
+    };
+    let main_volumes = |from: u64, to: u64| -> Vec<f64> {
+        between(from, to)
+            .filter_map(|s| s["main"]["volume"].as_f64())
+            .collect()
+    };
+    let volume = samples
+        .iter()
+        .rev()
+        .find_map(|s| s["volume"].as_f64())
+        .unwrap_or(0.0);
+    let ducked = volume * 0.2f64.cbrt();
+    let before = main_volumes(hold.saturating_sub(3000), hold);
+    let during = playing_at.map_or_else(Vec::new, |p| main_volumes(p + 500, release));
+    let after = main_volumes(release + 700, release + 2500);
+    let near = |values: &[f64], target: f64| {
+        !values.is_empty() && values.iter().all(|v| (v - target).abs() <= 1.5)
+    };
+    let audition_positions: Vec<f64> = playing_at.map_or_else(Vec::new, |p| {
+        between(p, release)
+            .filter_map(|s| s["audition"]["time_pos"].as_f64())
+            .collect()
+    });
+    let main: Vec<(u64, f64, u64)> = between(hold.saturating_sub(2000), release + 2500)
+        .filter_map(|s| {
+            Some((
+                sample_ms(s),
+                s["main"]["time_pos"].as_f64()?,
+                s["main"]["serial"].as_u64()?,
+            ))
+        })
+        .collect();
+    let main_continued = main.len() >= 10
+        && main
+            .windows(2)
+            .all(|w| w[1].1 >= w[0].1 && w[1].2 == w[0].2)
+        && main
+            .first()
+            .zip(main.last())
+            .is_some_and(|(a, b)| b.1 - a.1 >= 0.8 * (b.0 - a.0) as f64 / 1000.0);
+    let audition_advanced = audition_positions.len() >= 5
+        && rising(&audition_positions, 0.0)
+        && audition_positions.last().unwrap_or(&0.0) - audition_positions.first().unwrap_or(&0.0)
+            >= 1.0;
+    let queue_unchanged = !probed("deck:queue_before").is_null()
+        && probed("deck:queue_before") == probed("deck:queue_after");
+    let ok = near(&before, volume)
+        && near(&during, ducked)
+        && near(&after, volume)
+        && audition_advanced
+        && main_continued
+        && queue_unchanged;
+    json!({
+        "ok": ok,
+        "volume": volume,
+        "ducked_volume_expected": ducked,
+        "main_volume_before": before,
+        "main_volume_during": during,
+        "main_volume_after": after,
+        "audition_started_after_hold_ms": playing_at.map(|p| p.saturating_sub(hold)),
+        "audition_positions": audition_positions,
+        "audition_advanced": audition_advanced,
+        "main_positions": main.iter().map(|m| m.1).collect::<Vec<_>>(),
+        "main_continued": main_continued,
+        "queue_unchanged": queue_unchanged,
+    })
+}
+
+/// The blend into the radio's next song, read back from both decks.
+fn blend_report(app: &App) -> Value {
+    let samples = deck_samples();
+    let Some(seek) = clock_at("deck:blend_seek") else {
+        return json!({"ok": false, "why": "the seek was not marked"});
+    };
+    let window: Vec<&Value> = samples.iter().filter(|s| sample_ms(s) >= seek).collect();
+    let blend: Vec<&Value> = window
+        .iter()
+        .copied()
+        .filter(|s| !s["tail"].is_null())
+        .collect();
+    let pairs: Vec<(f64, f64)> = blend
+        .iter()
+        .filter_map(|s| amplitude(s, "main").zip(amplitude(s, "tail")))
+        .collect();
+    let rows: Vec<Value> = blend
+        .iter()
+        .map(|s| {
+            let (i, o) = (amplitude(s, "main"), amplitude(s, "tail"));
+            json!({
+                "ms": sample_ms(s) - seek,
+                "in_volume": s["main"]["volume"],
+                "out_volume": s["tail"]["volume"],
+                "in_amplitude": i,
+                "out_amplitude": o,
+                "power": i.zip(o).map(|(i, o)| i * i + o * o),
+                "progress": s["blend"],
+            })
+        })
+        .collect();
+    let ins: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+    let outs: Vec<f64> = pairs.iter().map(|p| -p.1).collect();
+    let equal_power = pairs.len() >= 10
+        && pairs
+            .iter()
+            .all(|(i, o)| (0.85..=1.15).contains(&(i * i + o * o)));
+    let crossfaded = rising(&ins, 0.03)
+        && rising(&outs, 0.03)
+        && ins.first().is_some_and(|i| *i < 0.4)
+        && outs.last().is_some_and(|o| -o < 0.4);
+    let serial = |s: &Value| s["main"]["serial"].as_u64();
+    let before_serial = samples
+        .iter()
+        .rev()
+        .find(|s| sample_ms(s) < seek)
+        .and_then(serial);
+    let blend_end = blend.last().map(|s| sample_ms(s));
+    let after: Vec<&Value> = blend_end.map_or_else(Vec::new, |end| {
+        window
+            .iter()
+            .copied()
+            .filter(|s| (end + 400..end + 3000).contains(&sample_ms(s)))
+            .collect()
+    });
+    let after_full = !after.is_empty()
+        && after
+            .iter()
+            .all(|s| s["tail"].is_null() && amplitude(s, "main").is_some_and(|a| a > 0.95));
+    let two_decks =
+        before_serial.is_some() && after.first().and_then(|s| serial(s)) != before_serial;
+    let next_current = current_id(app) == json!(noted("deck:radio", "next"));
+    let ok = equal_power && crossfaded && after_full && two_decks && next_current;
+    json!({
+        "ok": ok,
+        "equal_power": equal_power,
+        "crossfaded": crossfaded,
+        "full_volume_after": after_full,
+        "decks_swapped": two_decks,
+        "next_song_current": next_current,
+        "length_s": blend.first().zip(blend.last()).map(|(a, b)| (sample_ms(b) - sample_ms(a)) as f64 / 1000.0),
+        "samples": rows,
+    })
+}
+
+/// The album's change between its first two songs: the second one queued
+/// behind the first in the same mpv, and no blend.
+fn album_report(app: &App) -> Value {
+    let Some(seek) = clock_at("deck:album_seek") else {
+        return json!({"ok": false, "why": "the seek was not marked"});
+    };
+    let samples = deck_samples();
+    let window: Vec<&Value> = samples.iter().filter(|s| sample_ms(s) >= seek).collect();
+    let blended = window.iter().any(|s| !s["tail"].is_null());
+    let serials: std::collections::BTreeSet<u64> = window
+        .iter()
+        .filter_map(|s| s["main"]["serial"].as_u64())
+        .collect();
+    let last_first = window.iter().rev().find(|s| s["index"] == json!(0));
+    let first_second = window.iter().find(|s| s["index"] == json!(1));
+    // Wall time between the two samples against the audio between them.
+    let gap = last_first.zip(first_second).and_then(|(a, b)| {
+        let left = a["duration"].as_f64()? - a["position"].as_f64()?;
+        let into = b["position"].as_f64()?;
+        Some((sample_ms(b) - sample_ms(a)) as f64 / 1000.0 - left - into)
+    });
+    let queued = window
+        .first()
+        .is_some_and(|s| s["next_ready"] == json!(true) && s["cued"].is_null());
+    let changed = first_second.is_some() && app.playback.index == Some(1);
+    let ok = !blended && serials.len() == 1 && queued && changed;
+    json!({
+        "ok": ok,
+        "blended": blended,
+        "one_deck": serials.len() == 1,
+        "next_queued_behind_in_mpv": queued,
+        "changed_to_second_song": changed,
+        "gap_estimate_s": gap,
+    })
+}
+
+/// Audition and Smooth mixes. A playlist plays; a song on screen is held
+/// with Alt under the pointer and auditioned over the ducked current song,
+/// then let go. Smooth mixes go on in Settings; a radio blends into its next
+/// song with an equal-power crossfade on two decks; an album's songs still
+/// change gaplessly on one. Puts the volume, repeat, shuffle and the setting back.
+fn deck() -> Vec<Step> {
+    let alt = egui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    vec![
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        run(
+            "note what to put back; volume 60, repeat off, unshuffled, no mixes; sample the decks",
+            |a| {
+                probe(
+                    "deck:original",
+                    json!({
+                        "volume": a.playback.volume,
+                        "repeat": a.playback.repeat,
+                        "shuffle": a.playback.shuffle,
+                        "mixes": a.playback.mixes,
+                    }),
+                );
+                let cycles = match a.playback.repeat {
+                    crate::model::Repeat::Off => 0,
+                    crate::model::Repeat::All => 2,
+                    crate::model::Repeat::One => 1,
+                };
+                for _ in 0..cycles {
+                    a.backend.send(Command::CycleRepeat);
+                }
+                if a.playback.shuffle {
+                    a.backend.send(Command::ToggleShuffle);
+                }
+                a.backend.send(Command::Volume(60.0));
+                a.backend.send(Command::Mixes(crate::model::Mixes {
+                    on: false,
+                    ..a.playback.mixes
+                }));
+                a.backend.send(Command::SampleDecks(true));
+            },
+        ),
+        wait("library playlists", 60.0, |a| library_playlist(a).is_some()),
+        click_with("a library playlist with 8+ songs", library_playlist),
+        wait("playlist page", 60.0, current_loaded),
+        wait("songs on the page", 30.0, |a| page_items(a).len() >= 6),
+        run("pick the song to play", |a| {
+            if let Some(item) = page_items(a).first() {
+                note_item("deck:main", item);
+            }
+        }),
+        click_with("the first song's cover", |_| {
+            noted("deck:main", "title").map(|t| format!("Play {t}"))
+        }),
+        wait("the first song plays", 90.0, |a| {
+            audible(a) && current_id(a) == json!(noted("deck:main", "id"))
+        }),
+        // Audition: Alt held with the pointer resting on another song.
+        wait("a song on screen prepared", 120.0, |a| {
+            audition_candidate(a).is_some()
+        }),
+        run("pick it to audition", |a| {
+            if let Some(item) = audition_candidate(a) {
+                note_item("deck:held", item);
+            }
+        }),
+        run("note the queue", |a| {
+            probe("deck:queue_before", queue_state(a))
+        }),
+        hover_with("the song to audition", |_| noted("deck:held", "title")),
+        Step::Sleep(3.0),
+        clock_mark("deck:hold"),
+        Step::Hold(alt),
+        wait("the audition plays", 30.0, |a| {
+            a.playback.audition.as_ref().is_some_and(|x| {
+                x.playing && Some(&x.video_id) == noted("deck:held", "id").as_ref()
+            })
+        }),
+        measure("audition_playing_after_hold_ms", |_| {
+            json!(clock_at("deck:hold").map(|h| clock_ms().saturating_sub(h)))
+        }),
+        Step::Sleep(1.5),
+        Step::Screenshot("d01-audition"),
+        Step::Sleep(2.0),
+        clock_mark("deck:release"),
+        Step::Hold(egui::Modifiers::NONE),
+        wait("the audition ends", 5.0, |a| a.playback.audition.is_none()),
+        Step::Sleep(3.0),
+        run("note the queue again", |a| {
+            probe("deck:queue_after", queue_state(a))
+        }),
+        measure("audition", |_| audition_report()),
+        wait(
+            "audition: main ducked and back, both songs moved on, queue unchanged",
+            1.0,
+            |_| audition_report()["ok"] == json!(true),
+        ),
+        // Smooth mixes, turned on in Settings.
+        click("Settings"),
+        click("Blend songs on radios and mixes"),
+        wait("Smooth mixes on", 5.0, |a| a.playback.mixes.on),
+        Step::Screenshot("d02-smooth-mixes-setting"),
+        Step::Key(egui::Key::Escape),
+        run(
+            "start a radio from the playing song, as Start radio does",
+            |a| {
+                if let Some(track) = a.playback.index.and_then(|i| a.queue.get(i)) {
+                    let id = track.video_id.clone();
+                    a.backend.send(Command::PlayTarget(Target::Watch {
+                        video_id: Some(id.clone()),
+                        playlist_id: Some(format!("RDAMVM{id}")),
+                        params: Some("wAEB".into()),
+                    }));
+                }
+            },
+        ),
+        wait("the radio plays", 90.0, |a| {
+            audible(a)
+                && a.queue.len() > 5
+                && json!(queue_ids(a)) != probed("deck:queue_before")["queue"]
+        }),
+        wait("the next song cued on the second deck", 120.0, |a| {
+            a.playback.next_ready && a.playback.duration > 40.0
+        }),
+        run("note the radio's songs", |a| {
+            probe(
+                "deck:radio",
+                json!({
+                    "current": current_id(a),
+                    "next": upcoming(a, 1).first(),
+                    "duration": a.playback.duration,
+                    "seconds": a.playback.mixes.seconds,
+                }),
+            );
+        }),
+        clock_mark("deck:blend_seek"),
+        run("seek to 10 s before the end", |a| {
+            a.backend.send(Command::Seek(a.playback.duration - 10.0));
+        }),
+        wait("the next song is current", 30.0, |a| {
+            current_id(a) == json!(noted("deck:radio", "next"))
+        }),
+        Step::Sleep(1.5),
+        Step::Screenshot("d03-blend"),
+        wait("the blend is over", 30.0, |_| {
+            let samples = deck_samples();
+            let seek = clock_at("deck:blend_seek").unwrap_or(u64::MAX);
+            let window: Vec<&Value> = samples.iter().filter(|s| sample_ms(s) >= seek).collect();
+            window.iter().any(|s| !s["tail"].is_null())
+                && window.last().is_some_and(|s| s["tail"].is_null())
+        }),
+        Step::Sleep(3.0),
+        measure("blend", blend_report),
+        wait(
+            "blend: equal power on two decks, then the next song alone",
+            1.0,
+            |a| blend_report(a)["ok"] == json!(true),
+        ),
+        // An album stays gapless with Smooth mixes on.
+        run("open an album", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)))
+        }),
+        wait("album page", 60.0, current_loaded),
+        run("pick its first song", |a| {
+            if let Some(item) = page_items(a).first() {
+                note_item("deck:album", item);
+            }
+        }),
+        click_with("the album's first song", |_| {
+            noted("deck:album", "title").map(|t| format!("Play {t}"))
+        }),
+        wait("the album plays", 90.0, |a| {
+            audible(a) && current_id(a) == json!(noted("deck:album", "id"))
+        }),
+        wait("the second song queued behind it", 120.0, |a| {
+            a.playback.next_ready && a.playback.duration > 20.0
+        }),
+        clock_mark("deck:album_seek"),
+        run("seek to 6 s before the end", |a| {
+            a.backend.send(Command::Seek(a.playback.duration - 6.0));
+        }),
+        wait("the second song is current", 30.0, |a| {
+            a.playback.index == Some(1) && audible(a)
+        }),
+        Step::Sleep(3.0),
+        measure("album", album_report),
+        wait("album: gapless on one deck, no blend", 1.0, |a| {
+            album_report(a)["ok"] == json!(true)
+        }),
+        // Smooth mixes off again, in Settings.
+        click("Settings"),
+        click("Blend songs on radios and mixes"),
+        wait("Smooth mixes off", 5.0, |a| !a.playback.mixes.on),
+        Step::Key(egui::Key::Escape),
+        run("pause and put back volume, repeat, shuffle", |a| {
+            let original = probed("deck:original");
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+            if let Some(volume) = original["volume"].as_f64() {
+                a.backend.send(Command::Volume(volume));
+            }
+            let cycles = match original["repeat"].as_str() {
+                Some("All") => 1,
+                Some("One") => 2,
+                _ => 0,
+            };
+            for _ in 0..cycles {
+                a.backend.send(Command::CycleRepeat);
+            }
+            if original["shuffle"] == json!(true) {
+                a.backend.send(Command::ToggleShuffle);
+            }
+            if let Ok(mixes) = serde_json::from_value(original["mixes"].clone()) {
+                a.backend.send(Command::Mixes(mixes));
+            }
+            a.backend.send(Command::SampleDecks(false));
+        }),
+        wait("settings put back", 10.0, |a| {
+            let original = probed("deck:original");
+            original["volume"].as_f64() == Some(a.playback.volume)
+                && original["mixes"] == json!(a.playback.mixes)
+        }),
+    ]
+}
+
 enum Phase {
     Idle,
     Move(Pos2),
@@ -3157,6 +3646,11 @@ impl Driver {
                     });
                 }
                 self.note(&format!("key {key:?}"));
+                self.advance();
+            }
+            Step::Hold(modifiers) => {
+                self.pending.push(Event::ModifiersChanged(*modifiers));
+                self.note(&format!("hold {modifiers:?}"));
                 self.advance();
             }
             Step::Screenshot(name) => {
