@@ -53,6 +53,35 @@ fn set_offline(on: bool) {
     OFFLINE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// What the backend read back from mpv (gains, `af`, the sleep fade), for
+/// the engine scenarios.
+static PROBES: std::sync::Mutex<BTreeMap<String, Value>> = std::sync::Mutex::new(BTreeMap::new());
+
+pub fn probe(key: &str, value: Value) {
+    PROBES
+        .lock()
+        .expect("probes lock")
+        .insert(key.to_owned(), value);
+}
+
+/// Adds `value` to the list under `key`.
+pub fn probe_push(key: &str, value: Value) {
+    let mut probes = PROBES.lock().expect("probes lock");
+    match probes.entry(key.to_owned()).or_insert_with(|| json!([])) {
+        Value::Array(list) => list.push(value),
+        other => *other = json!([value]),
+    }
+}
+
+fn probed(key: &str) -> Value {
+    PROBES
+        .lock()
+        .expect("probes lock")
+        .get(key)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 fn page_tracks(app: &App) -> Vec<String> {
     app.page_state(&app.view.target())
         .and_then(|s| s.page.as_ref())
@@ -77,6 +106,8 @@ fn scenario(name: &str) -> Vec<Step> {
         "pages" => pages(),
         "desktop" => desktop(),
         "account" => account(),
+        "engine" => engine(),
+        "engine-restore" => engine_restore(),
         _ => journey(),
     }
 }
@@ -2113,6 +2144,575 @@ fn pages() -> Vec<Step> {
         }),
     ]);
     steps
+}
+
+// ---- engine: playback control ----
+
+/// Moments the engine scenarios time from.
+static MARKS: std::sync::Mutex<BTreeMap<&'static str, Instant>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn mark_time(name: &'static str) -> Step {
+    run(name, move |_| {
+        MARKS
+            .lock()
+            .expect("marks lock")
+            .insert(name, Instant::now());
+    })
+}
+
+fn ms_since(name: &'static str) -> impl Fn(&App) -> Value {
+    move |_| {
+        json!(
+            MARKS
+                .lock()
+                .expect("marks lock")
+                .get(name)
+                .map(|t| t.elapsed().as_millis() as u64)
+        )
+    }
+}
+
+/// A text field of something the scenario noted with [`probe`].
+fn noted(key: &str, field: &str) -> Option<String> {
+    probed(key)
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The songs on the page shown, as rows or cards.
+fn page_items(app: &App) -> Vec<&crate::model::Item> {
+    app.page_state(&app.view.target())
+        .and_then(|s| s.page.as_ref())
+        .map(|p| {
+            p.shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter(|i| i.track.is_some())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn item_id(item: &crate::model::Item) -> String {
+    item.track
+        .as_ref()
+        .map(|t| t.video_id.clone())
+        .unwrap_or_default()
+}
+
+/// Notes a song on the page (its id and the title its row is named by).
+fn note_item(key: &str, item: &crate::model::Item) {
+    probe(key, json!({"id": item_id(item), "title": item.title}));
+}
+
+/// Audio is coming out: mpv is past the start of the song.
+fn audible(app: &App) -> bool {
+    app.playback.playing && !app.playback.loading && app.playback.position > 0.05
+}
+
+fn queue_ids(app: &App) -> Vec<String> {
+    app.queue.iter().map(|t| t.video_id.clone()).collect()
+}
+
+/// The next `n` songs Up next shows.
+fn upcoming(app: &App, n: usize) -> Vec<String> {
+    let from = app.playback.index.map_or(0, |i| i + 1);
+    queue_ids(app).into_iter().skip(from).take(n).collect()
+}
+
+/// The songs the engine scenario adds with Play next and Add to queue.
+fn extras() -> Vec<crate::model::Track> {
+    serde_json::from_value(probed("engine:extras")).unwrap_or_default()
+}
+
+fn extra_id(i: usize) -> Option<String> {
+    extras().get(i).map(|t| t.video_id.clone())
+}
+
+fn extra_title(i: usize) -> Option<String> {
+    extras().get(i).map(|t| t.title.clone())
+}
+
+fn extra_ids(order: &[usize]) -> Vec<String> {
+    order.iter().filter_map(|&i| extra_id(i)).collect()
+}
+
+/// What `engine` wrote for `engine-restore`, in ytfast's cache directory.
+fn expected_file() -> Option<PathBuf> {
+    Some(
+        crate::paths::Paths::new()
+            .ok()?
+            .cache
+            .join("e2e-engine-expected.json"),
+    )
+}
+
+fn expected() -> Value {
+    expected_file()
+        .and_then(|f| std::fs::read(f).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// session.json as the backend last wrote it.
+fn saved_session() -> Value {
+    crate::paths::Paths::new()
+        .ok()
+        .and_then(|p| std::fs::read(p.cache.join("session.json")).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// The state a relaunch should bring back.
+fn session_state(app: &App) -> Value {
+    json!({
+        "queue": queue_ids(app),
+        "index": app.playback.index,
+        "position": app.playback.position,
+        "volume": app.playback.volume,
+        "shuffle": app.playback.shuffle,
+        "repeat": app.playback.repeat,
+        "autoplay": app.playback.autoplay,
+        "equalizer": app.playback.equalizer,
+        "normalize": app.playback.normalize,
+    })
+}
+
+/// session.json holds the queue, song, position and volume shown now.
+fn session_saved(app: &App) -> bool {
+    let saved = saved_session();
+    let ids: Option<Vec<String>> = saved["queue"]["entries"].as_array().map(|entries| {
+        entries
+            .iter()
+            .filter_map(|e| e["track"]["video_id"].as_str().map(str::to_owned))
+            .collect()
+    });
+    ids == Some(queue_ids(app))
+        && saved["index"].as_u64().map(|i| i as usize) == app.playback.index
+        && saved["position"]
+            .as_f64()
+            .is_some_and(|p| (p - app.playback.position).abs() < 1.0)
+        && saved["volume"].as_f64() == Some(app.playback.volume)
+}
+
+/// The relaunched app shows what `engine` left.
+fn restored_as_expected(app: &App) -> bool {
+    let want = expected();
+    let now = session_state(app);
+    [
+        "queue",
+        "index",
+        "volume",
+        "shuffle",
+        "repeat",
+        "autoplay",
+        "equalizer",
+    ]
+    .iter()
+    .all(|k| want[k] == now[k])
+        && want["position"]
+            .as_f64()
+            .is_some_and(|p| (p - app.playback.position).abs() < 1.0)
+}
+
+/// Lets the queue play on: notes each song as it plays and seeks near its
+/// end so the next one follows (gapless, as queued in mpv).
+fn advance_through(app: &mut App) {
+    let mut played: Vec<String> =
+        serde_json::from_value(probed("engine:played")).unwrap_or_default();
+    if let Value::String(id) = current_id(app)
+        && played.last() != Some(&id)
+    {
+        played.push(id);
+        probe("engine:played", json!(played));
+    }
+    let pb = &app.playback;
+    if audible(app) && pb.duration > 10.0 && pb.position < pb.duration - 6.0 {
+        app.backend.send(Command::Seek(pb.duration - 4.0));
+    }
+}
+
+fn played_after_edits() -> Vec<String> {
+    let played: Vec<String> = serde_json::from_value(probed("engine:played")).unwrap_or_default();
+    played.into_iter().skip(1).take(4).collect()
+}
+
+fn shown_after_edits() -> Vec<String> {
+    serde_json::from_value(probed("engine:shown")).unwrap_or_default()
+}
+
+/// mpv's `af` holds the Rock preset's graph (or nothing when bypassed).
+fn af_is(enabled: bool) -> bool {
+    let af = probed("af");
+    let graph = af["mpv_af"]
+        .as_array()
+        .and_then(|filters| {
+            filters
+                .iter()
+                .find(|f| f["label"] == crate::equalizer::LABEL)
+        })
+        .and_then(|f| f["params"]["graph"].as_str())
+        .map(str::to_owned);
+    af["preset"] == "Rock"
+        && af["enabled"] == enabled
+        && if enabled {
+            graph.is_some_and(|g| g.contains("equalizer@b0=f=31:t=o:w=1:g=4.5"))
+        } else {
+            af["mpv_af"].as_array().is_some_and(Vec::is_empty)
+        }
+}
+
+/// The last gain probe: what levelling set and what mpv has.
+fn last_gain() -> Value {
+    probed("gains")
+        .as_array()
+        .and_then(|l| l.last().cloned())
+        .unwrap_or(Value::Null)
+}
+
+fn sleep_choice(app: &App) -> Option<crate::model::Sleep> {
+    app.playback.sleep.map(|s| s.choice)
+}
+
+/// Control (docs/SPEC.md § Control) through the real app: how soon a cold
+/// click starts an unprepared song and a prepared one; Play next, Add to
+/// queue, a reorder and a remove in Up next, then the songs playing in the
+/// order shown; an equalizer preset, its bypass and loudness levelling as
+/// mpv has them; the sleep timer at a song's end and after a minute, with
+/// its fade. It ends paused at a known place with a known volume and writes
+/// what `engine-restore` (the next launch) must find.
+fn engine() -> Vec<Step> {
+    use crate::model::Sleep;
+    vec![
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        run(
+            "note what to put back, start unshuffled with levelling on",
+            |a| {
+                probe("engine:original", session_state(a));
+                if a.playback.shuffle {
+                    a.backend.send(Command::ToggleShuffle);
+                }
+                let cycles = match a.playback.repeat {
+                    crate::model::Repeat::Off => 0,
+                    crate::model::Repeat::All => 2,
+                    crate::model::Repeat::One => 1,
+                };
+                for _ in 0..cycles {
+                    a.backend.send(Command::CycleRepeat);
+                }
+                if !a.playback.normalize {
+                    a.backend.send(Command::Normalize(true));
+                }
+            },
+        ),
+        wait("library playlists", 60.0, |a| library_playlist(a).is_some()),
+        click_with("a library playlist with 8+ songs", library_playlist),
+        mark_time("page"),
+        wait("playlist page", 60.0, current_loaded),
+        // The first songs on screen are resolved ahead as the page shows.
+        wait("the first songs on screen prepared", 120.0, |a| {
+            let items = page_items(a);
+            items.len() >= 8
+                && items
+                    .iter()
+                    .take(2)
+                    .all(|i| a.backend.prepared(&item_id(i)))
+        }),
+        measure("first_two_prepared_ms", ms_since("page")),
+        measure("prepared_on_screen", |a| {
+            json!(
+                page_items(a)
+                    .iter()
+                    .take(8)
+                    .map(|i| a.backend.prepared(&item_id(i)))
+                    .collect::<Vec<_>>()
+            )
+        }),
+        Step::Screenshot("e01-playlist"),
+        // A cold click on a song nothing prepared, past the first rows.
+        run("pick an unprepared song", |a| {
+            if let Some(item) = page_items(a)
+                .into_iter()
+                .skip(4)
+                .find(|i| !a.backend.prepared(&item_id(i)))
+            {
+                note_item("engine:cold", item);
+            }
+        }),
+        mark_time("cold"),
+        click_with("the unprepared song", |_| noted("engine:cold", "title")),
+        wait("the unprepared song plays", 90.0, |a| {
+            audible(a) && current_id(a) == json!(noted("engine:cold", "id"))
+        }),
+        measure("cold_click_unprepared_ms", ms_since("cold")),
+        measure("unprepared_song", playing_track),
+        // A cold click on a song prepared since the page showed.
+        run("pick a prepared song", |a| {
+            if let Some(item) = page_items(a)
+                .into_iter()
+                .take(4)
+                .find(|i| a.backend.prepared(&item_id(i)) && current_id(a) != json!(item_id(i)))
+            {
+                note_item("engine:warm", item);
+            }
+        }),
+        mark_time("warm"),
+        click_with("the prepared song", |_| noted("engine:warm", "title")),
+        wait("the prepared song plays", 60.0, |a| {
+            audible(a) && current_id(a) == json!(noted("engine:warm", "id"))
+        }),
+        measure("cold_click_prepared_ms", ms_since("warm")),
+        measure("prepared_song", playing_track),
+        // Queue edits: Play next and Add to queue (the menus that offer them
+        // send these commands), then a reorder and a remove in Up next.
+        run("pick four songs from Home", |a| {
+            let queued: std::collections::HashSet<String> = queue_ids(a).into_iter().collect();
+            let mut extras: Vec<crate::model::Track> = Vec::new();
+            for track in a
+                .page_state(&View::Home.target())
+                .and_then(|s| s.page.as_ref())
+                .map(|p| {
+                    p.shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .filter_map(|i| i.track.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+            {
+                let fresh = !queued.contains(&track.video_id)
+                    && !extras.iter().any(|t| t.video_id == track.video_id)
+                    && !extras.iter().any(|t| t.title == track.title);
+                if fresh && extras.len() < 4 {
+                    extras.push(track);
+                }
+            }
+            probe("engine:extras", json!(extras));
+        }),
+        wait("four songs to add", 1.0, |_| extras().len() == 4),
+        run("Play next, Add to queue, Add to queue, Play next", |a| {
+            if let [e0, e1, e2, e3] = extras().as_slice() {
+                a.backend.send(Command::PlayNext(vec![e0.clone()]));
+                a.backend.send(Command::AddToQueue(vec![e1.clone()]));
+                a.backend.send(Command::AddToQueue(vec![e2.clone()]));
+                a.backend.send(Command::PlayNext(vec![e3.clone()]));
+            }
+        }),
+        wait(
+            "Up next: the last Play next, then the others in order",
+            10.0,
+            |a| upcoming(a, 4) == extra_ids(&[3, 0, 1, 2]),
+        ),
+        measure("up_next_after_additions", |a| json!(upcoming(a, 6))),
+        click("Open player"),
+        wait("now playing", 10.0, |a| a.now_playing),
+        hover_with("an added song in Up next", |_| extra_title(0)),
+        Step::Sleep(1.0),
+        Step::Screenshot("e02-up-next-additions"),
+        drag_with(
+            "the last Add to queue onto the first song after the current one",
+            |_| extra_title(2).map(|t| format!("Reorder {t}")),
+            |_| extra_title(3),
+        ),
+        wait("reordered", 10.0, |a| {
+            upcoming(a, 4) == extra_ids(&[3, 2, 0, 1])
+        }),
+        click_with("remove an added song", |_| {
+            extra_title(0).map(|t| format!("Remove {t}"))
+        }),
+        wait("removed", 10.0, |a| upcoming(a, 3) == extra_ids(&[3, 2, 1])),
+        measure("shown_order", |a| {
+            let shown = upcoming(a, 4);
+            probe("engine:shown", json!(shown));
+            json!(shown)
+        }),
+        Step::Screenshot("e03-up-next-edited"),
+        poll("the next four songs played", 300.0, advance_through, |_| {
+            played_after_edits().len() >= 4
+        }),
+        measure("played_order", |_| json!(played_after_edits())),
+        wait("played in the order shown", 1.0, |_| {
+            played_after_edits() == shown_after_edits()
+        }),
+        click("Close player"),
+        // The equalizer: a preset, bypassed, back on, as mpv's `af` has it.
+        click("Settings"),
+        click("Open equalizer"),
+        wait("equalizer open", 5.0, |a| a.equalizer_open),
+        click("Rock"),
+        wait("Rock in mpv", 15.0, |_| af_is(true)),
+        measure("af_rock", |_| probed("af")),
+        Step::Sleep(0.5),
+        Step::Screenshot("e04-equalizer-rock"),
+        click("Equalizer"),
+        wait("bypassed in mpv", 15.0, |_| af_is(false)),
+        measure("af_bypassed", |_| probed("af")),
+        click("Equalizer"),
+        wait("Rock back in mpv", 15.0, |_| af_is(true)),
+        click("Close equalizer"),
+        wait("equalizer closed", 5.0, |a| !a.equalizer_open),
+        // Loudness levelling off and on, as mpv's volume-gain has it.
+        measure("gains_so_far", |_| probed("gains")),
+        click("Settings"),
+        click("Even out loudness between songs"),
+        wait("levelling off in mpv", 15.0, |a| {
+            !a.playback.normalize
+                && last_gain()["normalize"] == false
+                && last_gain()["mpv_volume_gain"].as_f64() == Some(0.0)
+        }),
+        measure("gain_off", |_| last_gain()),
+        click("Settings"),
+        click("Even out loudness between songs"),
+        wait("levelling on in mpv", 15.0, |a| {
+            a.playback.normalize
+                && last_gain()["normalize"] == true
+                && last_gain()["mpv_volume_gain"].as_f64() == a.playback.gain
+        }),
+        measure("gain_on", |_| last_gain()),
+        // The sleep timer: at the end of a song, then after a minute. Now
+        // Playing is open, so "Play" is the player bar's.
+        click("Open player"),
+        wait("now playing again", 10.0, |a| a.now_playing),
+        click("Sleep timer"),
+        click("End of song"),
+        wait("timer at the song's end", 5.0, |a| {
+            sleep_choice(a) == Some(Sleep::EndOfSong)
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("e05-sleep-end-of-song"),
+        run("note the song, seek ten seconds before its end", |a| {
+            probe("engine:sleep_index", json!(a.playback.index));
+            probe("sleep_fade", json!([]));
+            let end = (a.playback.duration - 10.0).max(0.0);
+            a.backend.send(Command::Seek(end));
+        }),
+        wait("stopped after the song, the next one ready", 60.0, |a| {
+            let before = probed("engine:sleep_index").as_u64().map(|i| i as usize);
+            !a.playback.playing
+                && a.playback.sleep.is_none()
+                && a.playback.index.is_some()
+                && a.playback.index != before
+                && a.playback.position < 1.0
+        }),
+        measure("end_of_song", |a| {
+            json!({
+                "index": a.playback.index,
+                "playing": a.playback.playing,
+                "fade_volumes": probed("sleep_fade"),
+                "stopped": probed("sleep_stopped"),
+            })
+        }),
+        click("Play"),
+        wait("playing again", 60.0, audible),
+        run("a one-minute timer", |a| {
+            probe("sleep_fade", json!([]));
+            probe("sleep_stopped", Value::Null);
+            a.backend.send(Command::SleepTimer(Some(Sleep::Minutes(1))));
+        }),
+        wait("timer set", 5.0, |a| {
+            sleep_choice(a) == Some(Sleep::Minutes(1))
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("e06-sleep-timer"),
+        wait("faded out and paused", 90.0, |a| {
+            !a.playback.playing && a.playback.sleep.is_none()
+        }),
+        wait("paused by the timer, volume back", 5.0, |a| {
+            probed("sleep_stopped")["mpv_pause"] == true
+                && probed("sleep_stopped")["mpv_volume"].as_f64() == Some(a.playback.volume)
+        }),
+        measure("sleep_fade_volumes", |_| probed("sleep_fade")),
+        measure("sleep_stopped", |_| probed("sleep_stopped")),
+        // A session for the next launch: paused at 42 s with volume 63.
+        run("volume 63, then 42 s into the song", |a| {
+            a.backend.send(Command::Volume(63.0));
+            a.backend.send(Command::Seek(42.0));
+        }),
+        wait("at 42 s with volume 63", 15.0, |a| {
+            (a.playback.position - 42.0).abs() < 1.0 && a.playback.volume == 63.0
+        }),
+        wait(
+            "session.json has the queue, song, position and volume",
+            15.0,
+            session_saved,
+        ),
+        run("write what engine-restore expects", |a| {
+            let mut want = session_state(a);
+            want["original"] = probed("engine:original");
+            if let Some(file) = expected_file() {
+                let _ = std::fs::write(file, serde_json::to_vec_pretty(&want).unwrap_or_default());
+            }
+        }),
+        measure("expected_after_relaunch", |_| expected()),
+    ]
+}
+
+/// The launch after `engine`: the queue, song, position, volume, shuffle,
+/// repeat, autoplay and equalizer are back, paused, at once; Play starts
+/// from the saved place without waiting for a stream. Then it puts back
+/// the volume, equalizer and levelling the account's owner had before
+/// `engine`.
+fn engine_restore() -> Vec<Step> {
+    vec![
+        wait("a restored queue", 10.0, |a| {
+            !a.queue.is_empty() && a.playback.index.is_some()
+        }),
+        measure("restored_after_launch_ms", |a| {
+            json!(a.started.elapsed().as_millis() as u64)
+        }),
+        measure("restored", session_state),
+        measure("expected", |_| expected()),
+        wait("restored as engine left it, paused", 1.0, |a| {
+            restored_as_expected(a) && !a.playback.playing
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("r01-restored-paused"),
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        wait("the restored song prepared", 120.0, |a| {
+            current_id(a)
+                .as_str()
+                .is_some_and(|id| a.backend.prepared(id))
+        }),
+        mark_time("play"),
+        click("Play"),
+        wait("playing from the saved place", 30.0, |a| {
+            audible(a)
+                && expected()["position"]
+                    .as_f64()
+                    .is_some_and(|p| a.playback.position >= p - 0.5)
+        }),
+        measure("play_start_ms", ms_since("play")),
+        measure("playing", playing_track),
+        Step::Screenshot("r02-playing"),
+        run("pause, and put back what engine changed", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+            let original = &expected()["original"];
+            if let Some(volume) = original["volume"].as_f64() {
+                a.backend.send(Command::Volume(volume));
+            }
+            if let Ok(equalizer) = serde_json::from_value(original["equalizer"].clone()) {
+                a.backend.send(Command::Equalizer(equalizer));
+            }
+            if let Some(on) = original["normalize"].as_bool() {
+                a.backend.send(Command::Normalize(on));
+            }
+        }),
+        wait("settings put back", 10.0, |a| {
+            let original = &expected()["original"];
+            original["volume"].as_f64() == Some(a.playback.volume)
+                && original["equalizer"] == json!(a.playback.equalizer)
+        }),
+        // The equalizer is saved once edits settle.
+        Step::Sleep(1.5),
+    ]
 }
 
 enum Phase {

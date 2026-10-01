@@ -4,6 +4,7 @@
 
 mod account;
 mod chrome;
+mod equalizer;
 mod lyrics;
 pub mod mini;
 pub(crate) mod motion;
@@ -12,6 +13,7 @@ mod pages;
 mod player;
 mod settings;
 mod shelves;
+mod sleep;
 mod widgets;
 
 use crate::app::{Action, App, WindowKind};
@@ -73,6 +75,9 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         errors(app, ui, &p, actions);
     });
     account::dialogs(app, ui, &p, actions);
+    if app.equalizer_open {
+        equalizer::equalizer(app, ui.ctx(), &p, actions);
+    }
 }
 
 fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {

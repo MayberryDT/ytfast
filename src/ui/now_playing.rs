@@ -1,7 +1,7 @@
 use super::motion;
 use super::pages::skeleton_shelf;
 use super::shelves::shelf_view;
-use super::widgets::{cover, font, label, landing_cover, named, runs_line, track_line};
+use super::widgets::{cover, font, label, landing_cover, named, pill, runs_line, track_line};
 use crate::app::{Action, App, NowPlayingTab};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -140,7 +140,11 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
     }
 }
 
+/// The queue in play order. Each row plays on click; on hover it shows a
+/// handle to drag it elsewhere and a button to remove it.
 fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
+    let current = app.playback.index;
+    let upcoming = current.map_or(0, |c| app.queue.len().saturating_sub(c + 1));
     ui.horizontal(|ui| {
         let mut autoplay = app.playback.autoplay;
         if ui
@@ -155,21 +159,50 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
         {
             actions.push(Action::Command(Command::Autoplay(autoplay)));
         }
+        if upcoming > 0 {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill(ui, "Clear", None, false, p)
+                    .on_hover_text("Remove the songs after this one")
+                    .clicked()
+                {
+                    actions.push(Action::Command(Command::ClearUpcoming));
+                }
+            });
+        }
     });
     ui.add_space(6.0);
-    let current = app.playback.index;
     ScrollArea::vertical()
         .id_salt("up-next")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let mut rows: Vec<Rect> = Vec::with_capacity(app.queue.len());
+            let mut dragging = None;
+            let mut dropped = None;
             for (i, track) in app.queue.iter().enumerate() {
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
+                rows.push(rect);
                 let is_current = current == Some(i);
-                if is_current {
+                let pointer_here = ui.rect_contains_pointer(rect);
+                let handle = Rect::from_min_size(rect.min, vec2(28.0, rect.height()));
+                let handle_response = named(
+                    ui.interact(handle, Id::new(("up-next-handle", i)), Sense::drag()),
+                    &format!("Reorder {}", track.title),
+                )
+                .on_hover_cursor(egui::CursorIcon::Grab);
+                let held = handle_response.dragged();
+                if held {
+                    dragging = Some(i);
+                }
+                if handle_response.drag_stopped() {
+                    dropped = Some(i);
+                }
+                let tools = (pointer_here && !ui.input(|i| i.pointer.any_down())) || held;
+                if is_current || held {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(6), p.surface_active);
-                    if app.now_playing
+                    if is_current
+                        && app.now_playing
                         && ui.ctx().memory(|m| {
                             m.data.get_temp::<usize>(Id::new("up-next-scrolled")) != Some(i)
                         })
@@ -178,12 +211,18 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                         ui.ctx()
                             .memory_mut(|m| m.data.insert_temp(Id::new("up-next-scrolled"), i));
                     }
-                } else if response.hovered() {
+                } else if pointer_here {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(6), p.surface_hover);
                 }
+                if tools {
+                    Icon::Grip.image(p.secondary, 16.0).paint_at(
+                        ui,
+                        Rect::from_center_size(handle.center(), Vec2::splat(16.0)),
+                    );
+                }
                 let thumb = Rect::from_min_size(
-                    pos2(rect.left() + 8.0, rect.center().y - 20.0),
+                    pos2(handle.right(), rect.center().y - 20.0),
                     Vec2::splat(40.0),
                 );
                 cover(ui, thumb, track.thumbnail.as_deref(), false, 4, p);
@@ -205,14 +244,46 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 );
                 label(&mut text, &track.title, 14.5, Weight::Medium, p.text);
                 runs_line(&mut text, &track_line(track), 13.0, p, actions);
-                if let Some(d) = track.duration {
-                    ui.painter().text(
-                        pos2(rect.right() - 10.0, rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        format_time(f64::from(d)),
-                        font(Weight::Regular, 13.0),
-                        p.secondary,
+                // The playing song can't be removed; the others show a remove
+                // button in place of their length on hover.
+                let remove = (!is_current).then(|| {
+                    let area = Rect::from_center_size(
+                        pos2(rect.right() - 24.0, rect.center().y),
+                        Vec2::splat(32.0),
                     );
+                    named(
+                        ui.interact(area, Id::new(("up-next-remove", i)), Sense::click()),
+                        &format!("Remove {}", track.title),
+                    )
+                });
+                match &remove {
+                    Some(button) if tools => {
+                        if button.hovered() {
+                            ui.painter().circle_filled(
+                                button.rect.center(),
+                                16.0,
+                                p.surface_active,
+                            );
+                        }
+                        Icon::Close.image(p.text, 16.0).paint_at(
+                            ui,
+                            Rect::from_center_size(button.rect.center(), Vec2::splat(16.0)),
+                        );
+                    }
+                    _ => {
+                        if let Some(d) = track.duration {
+                            ui.painter().text(
+                                pos2(rect.right() - 10.0, rect.center().y),
+                                Align2::RIGHT_CENTER,
+                                format_time(f64::from(d)),
+                                font(Weight::Regular, 13.0),
+                                p.secondary,
+                            );
+                        }
+                    }
+                }
+                if remove.is_some_and(|b| b.on_hover_text("Remove from queue").clicked()) {
+                    actions.push(Action::Command(Command::RemoveFromQueue(i)));
                 }
                 if named(response, &track.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -222,6 +293,40 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                     actions.push(Action::Command(Command::JumpTo(i)));
                 }
             }
+            // A row being dragged: a line shows where it will land.
+            let Some(from) = dragging.or(dropped) else {
+                return;
+            };
+            let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+                return;
+            };
+            let gap = rows
+                .iter()
+                .position(|r| pointer.y < r.center().y)
+                .unwrap_or(rows.len());
+            if dropped.is_some() {
+                let to = if gap > from { gap - 1 } else { gap };
+                if to != from {
+                    actions.push(Action::Command(Command::MoveInQueue { from, to }));
+                }
+                return;
+            }
+            let y = match rows.get(gap) {
+                Some(row) => row.top(),
+                None => rows.last().map_or(pointer.y, |r| r.bottom()),
+            };
+            if gap != from && gap != from + 1 {
+                let width = rows.first().map_or(0.0..=0.0, |r| r.left()..=r.right());
+                ui.painter().hline(width, y, Stroke::new(2.0, p.accent));
+            }
+            // Near the edges, the list scrolls to reach further rows.
+            let clip = ui.clip_rect();
+            if pointer.y < clip.top() + 40.0 {
+                ui.scroll_with_delta(vec2(0.0, 8.0));
+            } else if pointer.y > clip.bottom() - 40.0 {
+                ui.scroll_with_delta(vec2(0.0, -8.0));
+            }
+            ui.ctx().request_repaint();
         });
 }
 

@@ -17,6 +17,7 @@ fastframe_icons::icons! {
         Queue => "list-music",
         Radio => "radio",
         History => "history",
+        Grip => "grip-vertical",
         Play => lucide "play",
         Pause => lucide "pause",
         Search => lucide "search",
@@ -44,5 +45,6 @@ fastframe_icons::icons! {
         Check => lucide "check",
         Pencil => lucide "pencil",
         Trash => lucide "trash-2",
+        Moon => lucide "moon",
     }
 }

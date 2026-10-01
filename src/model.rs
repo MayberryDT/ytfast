@@ -270,12 +270,29 @@ pub enum Account {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Repeat {
     #[default]
     Off,
     All,
     One,
+}
+
+/// When the sleep timer stops playback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sleep {
+    Minutes(u32),
+    EndOfSong,
+}
+
+/// A sleep timer that is set. Playback fades out over its last seconds,
+/// then pauses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SleepTimer {
+    pub choice: Sleep,
+    /// When playback pauses (`Minutes`); `EndOfSong` ends with the song,
+    /// at `duration - position`.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// Where playback is, as the interface draws it. The queue itself is sent
@@ -298,6 +315,13 @@ pub struct Playback {
     pub related: Option<String>,
     /// The next track is resolved and queued in the player for a gapless change.
     pub next_ready: bool,
+    /// The sleep timer, while one is set.
+    pub sleep: Option<SleepTimer>,
+    /// Loudness levelling between songs is on.
+    pub normalize: bool,
+    /// The loudness gain applied to the current song, in dB, once known.
+    pub gain: Option<f64>,
+    pub equalizer: crate::equalizer::Equalizer,
 }
 
 /// Parses "3:45" or "1:02:03" into seconds.

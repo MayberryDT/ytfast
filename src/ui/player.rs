@@ -168,7 +168,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     );
 
     // Right side first, so the middle gets what is left.
-    let right_width = 340.0;
+    let right_width = 340.0 + if pb.sleep.is_some() { 132.0 } else { 44.0 };
     let middle_width = (ui.available_width() - right_width).max(160.0);
     let (middle, _) = ui.allocate_exact_size(vec2(middle_width, PLAYER - 8.0), Sense::hover());
     let current = pb.index.and_then(|i| app.queue.get(i));
@@ -318,6 +318,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         if icon_button(ui, icon, 20.0, color, p, tip).clicked() {
             actions.push(Action::Command(Command::CycleRepeat));
         }
+        super::sleep::sleep_timer(app, ui, p, actions);
         let mut volume = pb.volume as f32;
         let slider = ui.add_sized(
             vec2(96.0, 20.0),

@@ -165,6 +165,8 @@ pub enum Action {
     ToggleLikeCurrent,
     /// Likes, library, subscriptions and playlists (see `crate::account`).
     Account(crate::account::AccountAction),
+    /// Show or hide the equalizer.
+    ShowEqualizer(bool),
 }
 
 pub struct App {
@@ -238,6 +240,10 @@ pub struct App {
     themed: bool,
     /// Likes, library and subscription marks, changes in flight, dialogs.
     pub account_state: crate::account::AccountState,
+    /// The equalizer window is open.
+    pub equalizer_open: bool,
+    /// The songs last prepared for being on screen.
+    on_screen: Vec<String>,
 }
 
 impl App {
@@ -314,6 +320,8 @@ impl App {
             #[cfg(feature = "e2e")]
             e2e: crate::e2e::Driver::from_env(),
             themed: false,
+            equalizer_open: false,
+            on_screen: Vec::new(),
         };
         app.start_themes();
         app.ensure_page(View::Home.target(), false);
@@ -582,7 +590,10 @@ impl App {
             Action::Play { tracks, start } => {
                 self.backend.send(Command::PlayTracks { tracks, start })
             }
-            Action::Command(command) => self.backend.send(command),
+            Action::Command(command) => {
+                self.optimistic(&command);
+                self.backend.send(command)
+            }
             Action::More {
                 key,
                 token,
@@ -701,6 +712,7 @@ impl App {
             }
             Action::ToggleLikeCurrent => self.toggle_like_current(),
             Action::Account(action) => self.account_action(action),
+            Action::ShowEqualizer(open) => self.equalizer_open = open,
         }
     }
 
@@ -892,6 +904,90 @@ impl App {
         }
     }
 
+    /// Playback edits show in the same frame; the backend's state follows.
+    fn optimistic(&mut self, command: &Command) {
+        let current = self.playback.index;
+        match command {
+            &Command::MoveInQueue { from, to } if from < self.queue.len() => {
+                let track = self.queue.remove(from);
+                let to = to.min(self.queue.len());
+                self.queue.insert(to, track);
+                self.playback.index = current.map(|c| {
+                    if c == from {
+                        to
+                    } else {
+                        let c = if from < c { c - 1 } else { c };
+                        if to <= c { c + 1 } else { c }
+                    }
+                });
+            }
+            &Command::RemoveFromQueue(at) if at < self.queue.len() && current != Some(at) => {
+                self.queue.remove(at);
+                self.playback.index = current.map(|c| if at < c { c - 1 } else { c });
+            }
+            Command::ClearUpcoming => {
+                if let Some(c) = current {
+                    self.queue.truncate(c + 1);
+                }
+            }
+            Command::Equalizer(equalizer) => self.playback.equalizer = equalizer.clone(),
+            &Command::Normalize(on) => self.playback.normalize = on,
+            &Command::SleepTimer(choice) => {
+                self.playback.sleep = choice.map(|choice| crate::model::SleepTimer {
+                    choice,
+                    deadline: match choice {
+                        crate::model::Sleep::Minutes(m) => {
+                            Some(Instant::now() + Duration::from_secs(u64::from(m) * 60))
+                        }
+                        crate::model::Sleep::EndOfSong => None,
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// A page's first songs are resolved ahead while it shows: the first
+    /// rows or cards of its first two shelves with songs.
+    fn prepare_on_screen(&mut self) {
+        if matches!(self.account, Account::Checking) || self.now_playing {
+            return;
+        }
+        let ids: Vec<String> = match self
+            .page_state(&self.view.target())
+            .and_then(|s| s.page.as_ref())
+        {
+            Some(page) => page
+                .shelves
+                .iter()
+                .map(|s| {
+                    s.items
+                        .iter()
+                        .filter_map(|i| i.track.as_ref())
+                        .take(4)
+                        .map(|t| t.video_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|ids| !ids.is_empty())
+                .take(2)
+                .flatten()
+                .take(6)
+                .collect(),
+            None => return,
+        };
+        if ids.is_empty() || ids == self.on_screen {
+            return;
+        }
+        self.on_screen = ids.clone();
+        let unprepared: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !self.backend.prepared(id))
+            .collect();
+        if !unprepared.is_empty() {
+            self.backend.send(Command::PrepareMany(unprepared));
+        }
+    }
+
     /// Sends a suggestion request when the search text changed.
     pub fn search_changed(&mut self) {
         let input = self.search.trim().to_owned();
@@ -937,6 +1033,7 @@ impl App {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
         self.desktop.focused.store(focused, Ordering::Relaxed);
         self.dropped(&ctx);
+        self.prepare_on_screen();
         self.theme_frame(&ctx);
         self.lyrics_frame();
         self.cover_frame(&ctx);
@@ -1013,8 +1110,10 @@ impl fastframe_shell::Resident for App {
     }
 
     fn shutdown(&mut self) {
-        // The backend goes with the app; its runtime stops mpv (kill on drop).
+        // Save the session and stop mpv before the process goes, whatever
+        // way fastframe-shell ends it; dropping the backend repeats it harmlessly.
         log::info!("quitting");
+        self.backend.shutdown();
     }
 }
 

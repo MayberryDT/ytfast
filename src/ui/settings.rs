@@ -1,4 +1,4 @@
-use super::widgets::{font, icon_button, label};
+use super::widgets::{font, icon_button, label, named, named_as};
 use crate::app::{Action, App};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -38,6 +38,34 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
         crate::e2e::register(&response.ctx, "Song notifications", response.interact_rect);
         if response.changed() {
             actions.push(Action::Notifications(notifications));
+        }
+        let mut normalize = app.playback.normalize;
+        if named_as(
+            ui.checkbox(&mut normalize, "Even out loudness between songs"),
+            egui::WidgetType::Checkbox,
+            "Even out loudness between songs",
+        )
+        .changed()
+        {
+            actions.push(Action::Command(Command::Normalize(normalize)));
+        }
+        if let (true, Some(gain)) = (app.playback.normalize, app.playback.gain) {
+            label(
+                ui,
+                format!("This song plays at {gain:+.1} dB"),
+                12.0,
+                Weight::Regular,
+                p.dim,
+            );
+        }
+        let equalizer = &app.playback.equalizer;
+        let status = if equalizer.enabled {
+            equalizer.preset.label()
+        } else {
+            "Off"
+        };
+        if named(ui.button(format!("Equalizer · {status}")), "Open equalizer").clicked() {
+            actions.push(Action::ShowEqualizer(true));
         }
         ui.add_space(8.0);
         label(ui, "Account", 12.0, Weight::SemiBold, p.secondary);

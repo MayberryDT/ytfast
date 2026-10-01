@@ -231,16 +231,27 @@ impl Client {
         self.call("account/account_menu", json!({})).await
     }
 
+    /// The `WEB_REMIX` player response for a song: loudness data
+    /// (`playerConfig.audioConfig`) and the play-tracking URL.
+    pub async fn player(&self, video_id: &str) -> Result<Value> {
+        self.call("player", json!({ "videoId": video_id })).await
+    }
+
     /// Adds a play to the account's history, as the web player does when a
     /// song starts: fetch the player response and ping its tracking URL.
     pub async fn report_play(&self, video_id: &str) -> Result<()> {
-        let player = self.call("player", json!({ "videoId": video_id })).await?;
+        let player = self.player(video_id).await?;
         let base = crate::parse::at(
             &player,
             &["playbackTracking", "videostatsPlaybackUrl", "baseUrl"],
         )
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::Invalid("no playback tracking".into()))?;
+        self.ping_playback(base).await
+    }
+
+    /// Pings a player response's `playbackTracking.videostatsPlaybackUrl.baseUrl`.
+    pub async fn ping_playback(&self, base: &str) -> Result<()> {
         let cpn: String = (0..16)
             .map(|_| {
                 const ALPHABET: &[u8] =
