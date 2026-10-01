@@ -716,7 +716,7 @@ fn chrome(
             peak: p.accent,
         };
         let height = 12.0 + 14.0 * open;
-        ridge::paint(
+        let crest = ridge::paint(
             ui.painter(),
             heat,
             duration,
@@ -726,10 +726,10 @@ fn chrome(
             open,
             &look,
         );
-        if let Some(peak) = heat.peak
+        if let Some(crest) = crest
             && open > 0.3
         {
-            ridge::peak_label(ui.painter(), heat, peak.at, duration, line, height, open, p);
+            ridge::peak_label(ui.painter(), crest, line, open, p);
         }
     }
     let painter = ui.painter();

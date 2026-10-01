@@ -76,7 +76,7 @@ fn value_at(points: &[(f32, f32)], x: f32) -> f32 {
 
 /// Draws the ridge rising from the top of `line`, `height` tall where the
 /// heat is greatest, `played` (0..=1) of it behind the playhead. `open`
-/// (0..=1) brings out the peak's mark and part.
+/// (0..=1) brings out the peak's mark and part. Returns the peak's crest.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint(
     painter: &Painter,
@@ -87,13 +87,14 @@ pub(super) fn paint(
     played: f32,
     open: f32,
     look: &Look,
-) {
+) -> Option<Pos2> {
     if duration <= 0.0 || heat.markers.is_empty() {
-        return;
+        return None;
     }
     let points = curve(heat, duration, line);
     let base = line.top();
     let top = |(x, v): (f32, f32)| pos2(x, base - height * v);
+    let tops: Vec<Pos2> = points.iter().map(|&p| top(p)).collect();
     let playhead = line.left() + line.width() * played.clamp(0.0, 1.0);
     let span = Rect::from_min_max(
         pos2(line.left() - 2.0, base - height - 4.0),
@@ -105,10 +106,12 @@ pub(super) fn paint(
     ] {
         let clipped = painter.with_clip_rect(clip.intersect(painter.clip_rect()));
         let mut mesh = egui::Mesh::default();
+        mesh.reserve_vertices(tops.len() * 2);
+        mesh.reserve_triangles(tops.len() * 2);
         let foot = colour.gamma_multiply(0.45);
-        for (i, &p) in points.iter().enumerate() {
-            mesh.colored_vertex(top(p), colour);
-            mesh.colored_vertex(pos2(p.0, base), foot);
+        for (i, &t) in tops.iter().enumerate() {
+            mesh.colored_vertex(t, colour);
+            mesh.colored_vertex(pos2(t.x, base), foot);
             if i > 0 {
                 let v = (i * 2) as u32;
                 mesh.add_triangle(v - 2, v - 1, v);
@@ -117,11 +120,7 @@ pub(super) fn paint(
         }
         clipped.add(egui::Shape::mesh(mesh));
     }
-    painter.add(egui::Shape::line(
-        points.iter().map(|&p| top(p)).collect(),
-        Stroke::new(1.2, look.edge),
-    ));
-    if let Some(peak) = heat.peak {
+    let peak = heat.peak.map(|peak| {
         let x = |t: f64| line.left() + (t / duration).clamp(0.0, 1.0) as f32 * line.width();
         let at = x(peak.at);
         if open > 0.02 {
@@ -132,9 +131,13 @@ pub(super) fn paint(
                 look.peak.gamma_multiply(0.7 * open),
             );
         }
-        let crest = top((at, value_at(&points, at)));
+        top((at, value_at(&points, at)))
+    });
+    painter.add(egui::Shape::line(tops, Stroke::new(1.2, look.edge)));
+    if let Some(crest) = peak {
         painter.circle_filled(crest, 2.2 + 1.6 * open, look.peak);
     }
+    peak
 }
 
 fn last_hover_id() -> Id {
@@ -188,7 +191,7 @@ pub(super) fn player_ridge(
         .show(ctx, |ui| {
             let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click_and_drag());
             let line = Rect::from_min_max(pos2(rect.left(), rect.bottom()), rect.right_bottom());
-            paint(
+            let crest = paint(
                 ui.painter(),
                 heat,
                 duration,
@@ -198,10 +201,10 @@ pub(super) fn player_ridge(
                 open,
                 &look,
             );
-            if let Some(peak) = heat.peak
+            if let Some(crest) = crest
                 && open > 0.3
             {
-                peak_label(ui.painter(), heat, peak.at, duration, line, height, open, p);
+                peak_label(ui.painter(), crest, line, open, p);
             }
             let fraction = response
                 .interact_pointer_pos()
@@ -232,21 +235,11 @@ pub(super) fn player_ridge(
     hovered
 }
 
-/// "Most replayed" over the peak, on a small plate so it reads over the page.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn peak_label(
-    painter: &Painter,
-    heat: &Heat,
-    at: f64,
-    duration: f64,
-    line: Rect,
-    height: f32,
-    open: f32,
-    p: &Palette,
-) {
-    let x = line.left() + (at / duration).clamp(0.0, 1.0) as f32 * line.width();
-    let points = curve(heat, duration, line);
-    let crest = line.top() - height * value_at(&points, x);
+/// "Most replayed" over the peak's crest, on a small plate so it reads over
+/// the page.
+pub(super) fn peak_label(painter: &Painter, crest: Pos2, line: Rect, open: f32, p: &Palette) {
+    let x = crest.x;
+    let crest = crest.y;
     let alpha = ((open - 0.3) / 0.7).clamp(0.0, 1.0);
     let galley = painter.layout_no_wrap(
         "Most replayed".to_owned(),
