@@ -3,14 +3,17 @@
 //! upcoming lines readable, past lines dimmer. Scrolling by hand holds the
 //! view for a few seconds; clicking a line seeks to it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::widgets::{font, label, named};
 use crate::app::{Action, App};
 use crate::backend::Command;
-use crate::model::Lyrics;
+use crate::model::{LyricLine, Lyrics};
 use crate::theme::Palette;
-use egui::{CornerRadius, Id, RichText, ScrollArea, Sense, Ui, pos2, vec2};
+use egui::{
+    Color32, CornerRadius, FontId, Id, Painter, RichText, ScrollArea, Sense, Ui, pos2, vec2,
+};
 use fastframe_fonts::Weight;
 
 /// How long a hand scroll holds the view before it follows the song again.
@@ -91,6 +94,85 @@ struct Follow {
     started: bool,
 }
 
+/// A lyric line's text as shown: an instrumental gap is a note.
+pub(super) fn line_text(line: &LyricLine) -> &str {
+    if line.text.is_empty() {
+        "♪"
+    } else {
+        line.text.as_str()
+    }
+}
+
+/// Where each lyric line sits when laid out in one font and width: its
+/// height and its top (lines `gap` apart). Measured once per song, font
+/// and width and kept in the window's memory, so a frame lays out only
+/// the lines it shows.
+#[derive(Clone)]
+pub(super) struct Metrics {
+    /// What was measured: song, font, width and gap.
+    key: Id,
+    pub heights: Arc<[f32]>,
+    pub tops: Arc<[f32]>,
+    /// Below the last line and its gap.
+    pub total: f32,
+}
+
+impl Metrics {
+    /// The first line that can show with the lines scrolled `offset` up.
+    pub fn first_visible(&self, offset: f32) -> usize {
+        self.tops
+            .partition_point(|&t| t <= offset)
+            .saturating_sub(1)
+    }
+}
+
+/// The metrics of `lyrics` (song `id`) in `font` at `width`, from the
+/// window's memory when they were measured before. `slot` names the view
+/// asking, which keeps one measurement at a time.
+pub(super) fn metrics(
+    painter: &Painter,
+    lyrics: &Lyrics,
+    id: &str,
+    font: &FontId,
+    width: f32,
+    gap: f32,
+    slot: (&str, bool),
+) -> Metrics {
+    let ctx = painter.ctx();
+    let key = Id::new(("lyric-metrics", id, font, width.to_bits(), gap.to_bits()));
+    let slot = Id::new(("lyric-metrics-slot", slot));
+    if let Some(m) = ctx.data(|d| d.get_temp::<Metrics>(slot))
+        && m.key == key
+    {
+        return m;
+    }
+    let mut heights = Vec::with_capacity(lyrics.lines.len());
+    let mut tops = Vec::with_capacity(lyrics.lines.len());
+    let mut y = 0.0_f32;
+    for line in &lyrics.lines {
+        let height = painter
+            .layout(
+                line_text(line).to_owned(),
+                font.clone(),
+                Color32::PLACEHOLDER,
+                width,
+            )
+            .size()
+            .y;
+        tops.push(y);
+        heights.push(height);
+        y += height + gap;
+    }
+    let m = Metrics {
+        key,
+        heights: heights.into(),
+        tops: tops.into(),
+        total: y,
+    };
+    ctx.data_mut(|d| d.insert_temp(slot, m.clone()));
+    m
+}
+
 fn timed(
     app: &App,
     ui: &mut Ui,
@@ -105,25 +187,32 @@ fn timed(
     let width = (rect.width() - 16.0).max(80.0);
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
 
-    // Lay the lines out: current large and lit, past dim, upcoming readable.
-    let mut lines = Vec::with_capacity(lyrics.lines.len());
-    let mut y = 0.0_f32;
-    for (i, line) in lyrics.lines.iter().enumerate() {
-        let (size, weight, color) = match current {
-            Some(c) if c == i => (26.0, Weight::Bold, p.accent),
-            Some(c) if i < c => (21.0, Weight::SemiBold, p.dim),
-            _ => (21.0, Weight::SemiBold, p.secondary),
-        };
-        let text = if line.text.is_empty() {
-            "♪"
-        } else {
-            line.text.as_str()
-        };
-        let galley = painter.layout(text.to_owned(), font(weight, size), color, width);
-        let height = galley.size().y;
-        lines.push((y, galley));
-        y += height + GAP;
-    }
+    // Current large and lit, past dim, upcoming readable. Every line is
+    // measured once in the regular style; the lit line, laid out each
+    // frame, pushes the lines after it down by its extra height.
+    let regular = font(Weight::SemiBold, 21.0);
+    let m = metrics(&painter, lyrics, id, &regular, width, GAP, ("tab", true));
+    let lit = current.map(|c| {
+        let galley = painter.layout(
+            line_text(&lyrics.lines[c]).to_owned(),
+            font(Weight::Bold, 26.0),
+            Color32::PLACEHOLDER,
+            width,
+        );
+        (c, galley)
+    });
+    let grow = lit
+        .as_ref()
+        .map_or(0.0, |(c, g)| g.size().y - m.heights[*c]);
+    let top_of = |i: usize| {
+        m.tops[i]
+            + if current.is_some_and(|c| i > c) {
+                grow
+            } else {
+                0.0
+            }
+    };
+    let y = m.total + grow;
     let source = lyrics
         .source
         .as_ref()
@@ -131,8 +220,9 @@ fn timed(
     let total = y + source.as_ref().map_or(0.0, |g| g.size().y + 16.0);
     // The last line can still come up to a third of the way down.
     let max_offset = (total - rect.height() * 0.6).max(0.0);
-    let target = current
-        .map(|c| lines[c].0 + lines[c].1.size().y / 2.0 - rect.height() / 3.0)
+    let target = lit
+        .as_ref()
+        .map(|(c, g)| top_of(*c) + g.size().y / 2.0 - rect.height() / 3.0)
         .unwrap_or(0.0)
         .clamp(0.0, max_offset);
 
@@ -164,11 +254,30 @@ fn timed(
     }
     follow.last = now;
 
-    for (i, (top, galley)) in lines.iter().enumerate() {
-        let line_rect = egui::Rect::from_min_size(
-            pos2(rect.left() + 8.0, rect.top() + top - follow.offset),
-            vec2(width, galley.size().y),
-        );
+    for i in m.first_visible(follow.offset - grow.max(0.0))..lyrics.lines.len() {
+        let top = rect.top() + top_of(i) - follow.offset;
+        if top > rect.bottom() {
+            break;
+        }
+        let (galley, color) = match &lit {
+            Some((c, galley)) if *c == i => (galley.clone(), p.accent),
+            _ => {
+                let color = if current.is_some_and(|c| i < c) {
+                    p.dim
+                } else {
+                    p.secondary
+                };
+                let galley = painter.layout(
+                    line_text(&lyrics.lines[i]).to_owned(),
+                    regular.clone(),
+                    Color32::PLACEHOLDER,
+                    width,
+                );
+                (galley, color)
+            }
+        };
+        let line_rect =
+            egui::Rect::from_min_size(pos2(rect.left() + 8.0, top), vec2(width, galley.size().y));
         if !line_rect.intersects(rect) {
             continue;
         }
@@ -177,8 +286,8 @@ fn timed(
         if response.hovered() {
             painter.rect_filled(visible, CornerRadius::same(6), p.surface_hover);
         }
-        painter.galley(line_rect.min, galley.clone(), p.secondary);
-        if named(response, galley.text())
+        painter.galley(line_rect.min, galley, color);
+        if named(response, line_text(&lyrics.lines[i]))
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
