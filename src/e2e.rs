@@ -1099,12 +1099,16 @@ fn browse_ids(page: &crate::model::Page) -> Vec<String> {
         .collect()
 }
 
+/// The playlist's own songs, not the "Suggestions" YouTube Music lists after them.
 fn song_ids(page: &crate::model::Page) -> Vec<String> {
-    page.shelves
-        .iter()
-        .flat_map(|s| &s.items)
-        .filter_map(|i| i.track.as_ref().map(|t| t.video_id.clone()))
-        .collect()
+    crate::account::entries(page)
+        .map(|s| {
+            s.items
+                .iter()
+                .filter_map(|i| i.track.as_ref().map(|t| t.video_id.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn subscriptions() -> Target {
