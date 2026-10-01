@@ -108,6 +108,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "account" => account(),
         "engine" => engine(),
         "engine-restore" => engine_restore(),
+        "control" => control(),
         _ => journey(),
     }
 }
@@ -821,13 +822,19 @@ enum Step {
         label: Candidates,
         describe: String,
         timeout: f64,
+        /// Primary, or secondary for a right-click.
+        button: egui::PointerButton,
     },
     Type(String),
+    /// Types text worked out when the step runs.
+    TypeWith(Label),
     /// Pastes text (as Ctrl+V would) into the focused field.
     Paste(Label),
     /// Asks the window for something, as the user or compositor would.
     Window(&'static str, egui::ViewportCommand),
     Key(egui::Key),
+    /// A key with modifiers held (Ctrl+K, Shift+→, Alt+←, `?`).
+    KeyWith(egui::Modifiers, egui::Key),
     Screenshot(&'static str),
     Measure {
         name: &'static str,
@@ -872,6 +879,7 @@ fn click(label: &str) -> Step {
         describe: fixed.clone(),
         label: Box::new(move |_| vec![fixed.clone()]),
         timeout: 15.0,
+        button: egui::PointerButton::Primary,
     }
 }
 
@@ -880,6 +888,7 @@ fn click_with(describe: &str, label: impl Fn(&App) -> Option<String> + 'static) 
         describe: describe.to_owned(),
         label: Box::new(move |a| label(a).into_iter().collect()),
         timeout: 20.0,
+        button: egui::PointerButton::Primary,
     }
 }
 
@@ -890,6 +899,20 @@ fn click_first_visible(describe: &str, labels: impl Fn(&App) -> Vec<String> + 's
         describe: describe.to_owned(),
         label: Box::new(labels),
         timeout: 20.0,
+        button: egui::PointerButton::Primary,
+    }
+}
+
+/// Right-clicks the first of several candidates that is on screen.
+fn right_click_first_visible(
+    describe: &str,
+    labels: impl Fn(&App) -> Vec<String> + 'static,
+) -> Step {
+    Step::Click {
+        describe: describe.to_owned(),
+        label: Box::new(labels),
+        timeout: 20.0,
+        button: egui::PointerButton::Secondary,
     }
 }
 
@@ -2747,6 +2770,486 @@ fn engine_restore() -> Vec<Step> {
     ]
 }
 
+/// The E2E album's songs, in order.
+fn album_tracks(app: &App) -> Vec<crate::model::Track> {
+    app.page_state(&Target::browse(E2E_ALBUM))
+        .and_then(|s| s.page.as_ref())
+        .map(|p| {
+            p.shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter_map(|i| i.track.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Play anything's top result when it is a song: (id, title).
+fn top_song(app: &App) -> Option<(String, String)> {
+    match &app.control.play_anything.hits().first()?.go {
+        crate::palette::Go::Song(t) => Some((t.video_id.clone(), t.title.clone())),
+        _ => None,
+    }
+}
+
+fn number(key: &str) -> f64 {
+    fact(key).and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+
+fn current_rating(app: &App) -> Option<crate::model::LikeStatus> {
+    app.current_track().map(|t| app.account_state.marks.like(t))
+}
+
+/// The repeat mode `n` presses of R after the one noted.
+fn repeat_after(n: usize) -> String {
+    const CYCLE: [&str; 3] = ["Off", "All", "One"];
+    let start = fact("control_repeat")
+        .and_then(|r| CYCLE.iter().position(|c| *c == r))
+        .unwrap_or(0);
+    CYCLE[(start + n) % 3].to_owned()
+}
+
+/// The first cards of `target`'s first card shelves whose menu offers Go to
+/// artist: (card title, artist id).
+fn cards_with_artist(app: &App, target: &Target) -> Vec<(String, String)> {
+    use crate::model::{ItemKind, ShelfStyle};
+    let Some(page) = app.page_state(target).and_then(|s| s.page.as_ref()) else {
+        return Vec::new();
+    };
+    page.shelves
+        .iter()
+        .filter(|s| matches!(s.style, ShelfStyle::Carousel | ShelfStyle::Grid))
+        .take(2)
+        .flat_map(|s| s.items.iter().take(4))
+        .filter_map(|i| {
+            let artist = match &i.track {
+                Some(t) => t.artists.iter().find_map(|a| a.target.clone()),
+                None if matches!(i.kind, ItemKind::Album | ItemKind::Playlist) => {
+                    i.subtitle.iter().find_map(|r| {
+                        r.target.clone().filter(
+                            |t| matches!(t, Target::Browse { id, .. } if id.starts_with("UC")),
+                        )
+                    })
+                }
+                None => None,
+            }?;
+            match artist {
+                Target::Browse { id, .. } => Some((i.title.clone(), id)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn noted_cards() -> Vec<(String, String)> {
+    serde_json::from_value(probed("control:cards")).unwrap_or_default()
+}
+
+fn sorted_playlists(app: &App) -> Option<String> {
+    let mut ids = browse_ids(refetched(app, &LibraryTab::Playlists.target())?);
+    ids.sort();
+    Some(ids.join(","))
+}
+
+fn queue_playlist() -> Option<Target> {
+    fact("control_playlist").map(|id| Target::browse(format!("VL{id}")))
+}
+
+/// Control (docs/SPEC.md § Control) and Play anything (signature moments)
+/// through the keyboard and the menus: Ctrl+K, typing a song and Enter
+/// (timed to audible), the `?` overlay, Space, →, Shift+→, - and +, M, S,
+/// R, L twice (the rating as found, checked with YouTube Music), N, Q,
+/// Alt+← and Alt+→; right-click Play next and Add to queue landing in Up
+/// next in order; a card's Go to artist; Copy link from the artist's
+/// header; the queue saved as a playlist (checked song for song) and
+/// deleted again. Screenshots of Play anything with results, the shortcuts
+/// and every menu. Leaves the account, volume, shuffle and repeat as found.
+fn control() -> Vec<Step> {
+    use egui::{Key, Modifiers};
+    let album = Target::browse(E2E_ALBUM);
+    let album2 = album.clone();
+    vec![
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        run("fetch Library's playlists", |a| {
+            set_confirmed();
+            a.ensure_page(LibraryTab::Playlists.target(), true);
+            a.ensure_page(View::Explore.target(), false);
+        }),
+        wait("Library's playlists fetched", 60.0, |a| {
+            sorted_playlists(a).is_some()
+        }),
+        run("remember them", |a| {
+            set_fact("control_playlists", sorted_playlists(a).unwrap_or_default())
+        }),
+        run("open Discovery from Home", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)))
+        }),
+        wait("album page", 60.0, current_loaded),
+        run("pick songs", |a| {
+            if let [_, _, song, _, next, queued, ..] = album_tracks(a).as_slice() {
+                set_fact("control_song_title", song.title.clone());
+                set_fact("control_next", next.video_id.clone());
+                set_fact("control_next_title", next.title.clone());
+                set_fact("control_queued", queued.video_id.clone());
+                set_fact("control_queued_title", queued.title.clone());
+            }
+        }),
+        wait("six songs on the album", 1.0, |_| {
+            fact("control_queued").is_some()
+        }),
+        // Play anything: Ctrl+K, a song's name, Enter.
+        Step::KeyWith(Modifiers::CTRL, Key::K),
+        wait("Play anything open", 2.0, |a| a.control.play_anything.open),
+        Step::TypeWith(Box::new(|_| fact("control_song_title"))),
+        wait("the song on top in the frame of typing", 1.0, |a| {
+            top_song(a).is_some_and(|(_, t)| Some(t) == fact("control_song_title"))
+        }),
+        wait("YouTube Music's results joined in", 15.0, |a| {
+            let pa = &a.control.play_anything;
+            !pa.searching() && pa.hits().len() >= 3
+        }),
+        measure("play_anything_results", |a| {
+            json!(
+                a.control
+                    .play_anything
+                    .hits()
+                    .iter()
+                    .map(|h| json!({"title": h.title, "kind": format!("{:?}", h.kind)}))
+                    .collect::<Vec<_>>()
+            )
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-01-play-anything"),
+        run("note the top result", |a| {
+            if let Some((id, _)) = top_song(a) {
+                set_fact("control_top", id);
+            }
+        }),
+        wait("the top result is still the song typed", 1.0, |a| {
+            top_song(a).is_some_and(|(_, t)| Some(t) == fact("control_song_title"))
+        }),
+        measure("top_result_prepared", |a| {
+            json!(fact("control_top").is_some_and(|id| a.backend.prepared(&id)))
+        }),
+        mark_time("enter"),
+        Step::Key(Key::Enter),
+        wait("Play anything closed", 1.0, |a| {
+            !a.control.play_anything.open
+        }),
+        wait("the song plays", 30.0, |a| {
+            playing_id(a) == fact("control_top") && audible(a)
+        }),
+        measure("enter_to_audible_ms", ms_since("enter")),
+        // The shortcuts.
+        Step::KeyWith(Modifiers::SHIFT, Key::Questionmark),
+        wait("? shows the shortcuts", 2.0, |a| a.control.help),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-02-shortcuts"),
+        Step::Key(Key::Escape),
+        wait("Esc closes them", 2.0, |a| !a.control.help),
+        // Playback.
+        Step::Key(Key::Space),
+        wait("Space paused", 5.0, |a| !a.playback.playing),
+        Step::Key(Key::Space),
+        wait("Space played again", 15.0, audible),
+        run("note the position", |a| {
+            set_fact("control_position", a.position_now().to_string())
+        }),
+        Step::Key(Key::ArrowRight),
+        wait("→ went 5 seconds on", 5.0, |a| {
+            let before = number("control_position");
+            a.playback.position >= before + 4.0 && a.playback.position < before + 9.0
+        }),
+        run("mark the song", |a| {
+            set_mark(playing_id(a).unwrap_or_default())
+        }),
+        Step::KeyWith(Modifiers::SHIFT, Key::ArrowRight),
+        wait("Shift+→ played the next song", 30.0, song_changed),
+        run("note the volume", |a| {
+            set_fact("control_volume", a.playback.volume.to_string())
+        }),
+        Step::Key(Key::Minus),
+        wait("- turned it down 5", 3.0, |a| {
+            (a.playback.volume - (number("control_volume") - 5.0).max(0.0)).abs() < 0.5
+        }),
+        Step::KeyWith(Modifiers::SHIFT, Key::Plus),
+        wait("+ turned it up 5", 3.0, |a| {
+            let down = (number("control_volume") - 5.0).max(0.0);
+            (a.playback.volume - (down + 5.0).min(100.0)).abs() < 0.5
+        }),
+        Step::Key(Key::M),
+        wait("M muted", 3.0, |a| a.playback.volume <= 0.0),
+        Step::Key(Key::M),
+        wait("M unmuted", 3.0, |a| a.playback.volume > 0.0),
+        run("the volume as found", |a| {
+            let before = number("control_volume");
+            if (a.playback.volume - before).abs() > 0.5 {
+                a.backend.send(Command::Volume(before));
+            }
+        }),
+        run("note shuffle and repeat", |a| {
+            set_fact("control_shuffle", a.playback.shuffle.to_string());
+            set_fact("control_repeat", format!("{:?}", a.playback.repeat));
+        }),
+        Step::Key(Key::S),
+        wait("S turned shuffle over", 5.0, |a| {
+            Some(a.playback.shuffle.to_string()) != fact("control_shuffle")
+        }),
+        Step::Key(Key::S),
+        wait("S turned it back", 5.0, |a| {
+            Some(a.playback.shuffle.to_string()) == fact("control_shuffle")
+        }),
+        Step::Key(Key::R),
+        wait("R: the next repeat mode", 5.0, |a| {
+            format!("{:?}", a.playback.repeat) == repeat_after(1)
+        }),
+        Step::Key(Key::R),
+        wait("R: the one after", 5.0, |a| {
+            format!("{:?}", a.playback.repeat) == repeat_after(2)
+        }),
+        Step::Key(Key::R),
+        wait("R: back as found", 5.0, |a| {
+            format!("{:?}", a.playback.repeat) == repeat_after(3)
+        }),
+        // L, twice: the rating ends as YouTube Music had it.
+        run("ask YouTube Music for the song's rating", |a| {
+            if let Some(id) = playing_id(a) {
+                set_fact("control_rated", id);
+            }
+            ask_rating(a, "control_rated");
+        }),
+        wait("rating fetched", 30.0, |a| {
+            rated(a, "control_rated").is_some()
+        }),
+        run("note it", |a| {
+            set_fact("control_rating", format!("{:?}", rated(a, "control_rated")));
+            set_fact("control_shown", format!("{:?}", current_rating(a)));
+        }),
+        Step::Key(Key::L),
+        wait("L changed the like", 15.0, |a| {
+            idle(a) && Some(format!("{:?}", current_rating(a))) != fact("control_shown")
+        }),
+        Step::Key(Key::L),
+        // Like ⇄ unlike comes back; a disliked song is liked, then cleared.
+        wait("L again undid it", 15.0, |a| {
+            let shown = Some(format!("{:?}", current_rating(a)));
+            idle(a)
+                && (shown == fact("control_shown")
+                    || fact("control_shown").as_deref() == Some("Some(Dislike)")
+                        && shown.as_deref() == Some("Some(Indifferent)"))
+        }),
+        Step::Sleep(1.0),
+        run("a dislike comes back as it was", |a| {
+            use crate::model::LikeStatus;
+            if fact("control_rating").as_deref() == Some("Some(Dislike)")
+                && let Some(track) = a.current_track().cloned()
+            {
+                a.account_action(crate::account::AccountAction::Rate {
+                    track,
+                    status: LikeStatus::Dislike,
+                });
+            }
+        }),
+        wait("rating changes answered", 15.0, idle),
+        poll(
+            "the rating as YouTube Music had it",
+            40.0,
+            |a| ask_rating(a, "control_rated"),
+            |a| Some(format!("{:?}", rated(a, "control_rated"))) == fact("control_rating"),
+        ),
+        // Views.
+        Step::Key(Key::N),
+        wait("N opened Now Playing", 3.0, |a| a.now_playing),
+        Step::Key(Key::N),
+        wait("N closed it", 3.0, |a| !a.now_playing),
+        Step::Key(Key::Q),
+        wait("Q opened Up next", 3.0, |a| {
+            a.now_playing && a.now_playing_tab == crate::app::NowPlayingTab::UpNext
+        }),
+        Step::Sleep(0.8),
+        Step::Screenshot("control-03-up-next"),
+        right_click_first_visible("an Up next row", |a| {
+            let from = a.playback.index.map_or(0, |i| i + 1);
+            a.queue
+                .iter()
+                .skip(from)
+                .take(4)
+                .map(|t| format!("Cover of {}", t.title))
+                .collect()
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-04-up-next-menu"),
+        Step::Key(Key::Escape),
+        Step::Sleep(0.3),
+        Step::KeyWith(Modifiers::ALT, Key::ArrowLeft),
+        wait("Alt+← closed Now Playing", 3.0, |a| !a.now_playing),
+        Step::KeyWith(Modifiers::ALT, Key::ArrowLeft),
+        wait("Alt+← went back to Home", 5.0, |a| a.view == View::Home),
+        Step::KeyWith(Modifiers::ALT, Key::ArrowRight),
+        wait("Alt+→ came forward to the album", 5.0, move |a| {
+            a.view == View::Page(album.clone())
+        }),
+        wait("album shown", 30.0, current_loaded),
+        Step::Sleep(0.5),
+        // Right-click two songs: Play next, then Add to queue.
+        right_click_first_visible("a song for Play next", |_| {
+            fact("control_next_title")
+                .map(|t| format!("Play {t}"))
+                .into_iter()
+                .collect()
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-05-song-menu"),
+        click("Play next"),
+        right_click_first_visible("a song for Add to queue", |_| {
+            fact("control_queued_title")
+                .map(|t| format!("Play {t}"))
+                .into_iter()
+                .collect()
+        }),
+        Step::Sleep(0.3),
+        click("Add to queue"),
+        wait(
+            "Up next: the Play next song, then the Add to queue one",
+            10.0,
+            |a| facts(&["control_next", "control_queued"]).is_some_and(|ids| upcoming(a, 2) == ids),
+        ),
+        // A card's Go to artist.
+        run("find cards with an artist", |a| {
+            for target in [View::Explore.target(), View::Home.target()] {
+                let cards = cards_with_artist(a, &target);
+                if !cards.is_empty() {
+                    probe("control:cards", json!(cards));
+                    if let Some(view) = View::for_target(&target) {
+                        a.open(view);
+                    }
+                    return;
+                }
+            }
+        }),
+        wait("cards to right-click", 1.0, |_| !noted_cards().is_empty()),
+        wait("their page shown", 30.0, current_loaded),
+        Step::Sleep(0.5),
+        right_click_first_visible("a card", |_| {
+            noted_cards().into_iter().map(|(title, _)| title).collect()
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-06-card-menu"),
+        click("Go to artist"),
+        wait("the card's artist opened", 30.0, |a| {
+            matches!(&a.view, View::Page(Target::Browse { id, .. })
+                if noted_cards().iter().any(|(_, artist)| artist == id))
+                && current_loaded(a)
+        }),
+        // Copy link from the artist's header.
+        Step::Sleep(0.5),
+        click("More actions"),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-07-artist-menu"),
+        click("Copy link"),
+        wait("the artist's link copied", 3.0, |a| {
+            match (&a.control.copied, &a.view) {
+                (Some(link), View::Page(Target::Browse { id, .. })) => {
+                    *link == format!("https://music.youtube.com/channel/{id}")
+                }
+                _ => false,
+            }
+        }),
+        measure("copied_link", |a| json!(a.control.copied)),
+        // The player bar's menu.
+        right_click_first_visible("the playing song", |_| vec!["Cover".to_owned()]),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-08-player-menu"),
+        Step::Key(Key::Escape),
+        Step::Sleep(0.3),
+        // Save the queue as a playlist, then delete it.
+        Step::Key(Key::Q),
+        wait("Up next for Save", 3.0, |a| a.now_playing),
+        Step::Sleep(0.5),
+        click("Save"),
+        wait("new playlist dialog named for the queue", 5.0, |a| {
+            matches!(&a.account_state.dialog,
+                Some(crate::account::Dialog::NewPlaylist { title, tracks, .. })
+                    if title.starts_with("Queue · ") && !tracks.is_empty())
+        }),
+        run("note the queue", |a| {
+            let mut seen = std::collections::HashSet::new();
+            let ids: Vec<String> = queue_ids(a)
+                .into_iter()
+                .filter(|id| seen.insert(id.clone()))
+                .collect();
+            probe("control:queue", json!(ids));
+        }),
+        Step::Sleep(0.5),
+        Step::Screenshot("control-09-save-queue"),
+        click("Create"),
+        wait("playlist created", 30.0, |a| {
+            idle(a)
+                && a.account_state
+                    .created
+                    .as_ref()
+                    .is_some_and(|(t, _)| t.starts_with("Queue · "))
+        }),
+        run("remember it", |a| {
+            if let Some((_, id)) = &a.account_state.created {
+                set_fact("control_playlist", id.clone());
+            }
+            set_confirmed();
+        }),
+        poll(
+            "the playlist holds the queue in order",
+            60.0,
+            |a| {
+                if let Some(target) = queue_playlist() {
+                    a.ensure_page(target, true);
+                }
+            },
+            |a| {
+                let expected: Vec<String> =
+                    serde_json::from_value(probed("control:queue")).unwrap_or_default();
+                let Some(listed) = queue_playlist().and_then(|t| refetched(a, &t).map(song_ids))
+                else {
+                    return false;
+                };
+                let n = listed.len().min(expected.len());
+                n > 0 && listed[..n] == expected[..n] && (n == expected.len() || n >= 100)
+            },
+        ),
+        measure("saved_queue_songs", |a| {
+            json!(
+                queue_playlist()
+                    .and_then(|t| refetched(a, &t).map(song_ids))
+                    .map(|ids| ids.len())
+            )
+        }),
+        run("open it", |a| {
+            if let Some(target) = queue_playlist() {
+                a.open(View::Page(target));
+            }
+        }),
+        wait("its page", 30.0, current_loaded),
+        click("Delete playlist"),
+        wait("delete dialog", 5.0, |a| dialog_open(a, "delete")),
+        click("Delete"),
+        wait("delete accepted", 30.0, idle),
+        run("mark", |_| set_confirmed()),
+        poll(
+            "Library's playlists as found",
+            40.0,
+            |a| a.ensure_page(LibraryTab::Playlists.target(), true),
+            |a| sorted_playlists(a) == fact("control_playlists"),
+        ),
+        // Leave it paused, on the album.
+        run("back to the album", move |a| {
+            a.open(View::Page(album2.clone()))
+        }),
+        Step::Key(Key::Space),
+        wait("paused", 5.0, |a| !a.playback.playing),
+    ]
+}
+
 enum Phase {
     Idle,
     Move(Pos2),
@@ -2886,6 +3389,7 @@ impl Driver {
                 label,
                 describe,
                 timeout,
+                button,
             } => match self.phase {
                 Phase::Idle => {
                     let wanted = label(app);
@@ -2916,7 +3420,7 @@ impl Driver {
                 Phase::Move(pos) => {
                     self.pending.push(Event::PointerButton {
                         pos,
-                        button: egui::PointerButton::Primary,
+                        button: *button,
                         pressed: true,
                         modifiers: Default::default(),
                     });
@@ -2925,7 +3429,7 @@ impl Driver {
                 Phase::Press(pos) => {
                     self.pending.push(Event::PointerButton {
                         pos,
-                        button: egui::PointerButton::Primary,
+                        button: *button,
                         pressed: false,
                         modifiers: Default::default(),
                     });
@@ -2942,6 +3446,14 @@ impl Driver {
                 self.note(&line);
                 self.advance();
             }
+            Step::TypeWith(text) => match text(app) {
+                Some(text) => {
+                    self.note(&format!("type {text:?}"));
+                    self.pending.push(Event::Text(text));
+                    self.advance();
+                }
+                None => self.fail("nothing to type".into()),
+            },
             Step::Paste(text) => match text(app) {
                 Some(text) => {
                     self.note(&format!("paste {text:?}"));
@@ -2967,6 +3479,20 @@ impl Driver {
                     });
                 }
                 self.note(&format!("key {key:?}"));
+                self.advance();
+            }
+            Step::KeyWith(modifiers, key) => {
+                let (modifiers, key) = (*modifiers, *key);
+                for pressed in [true, false] {
+                    self.pending.push(Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    });
+                }
+                self.note(&format!("key {modifiers:?} {key:?}"));
                 self.advance();
             }
             Step::Screenshot(name) => {

@@ -173,7 +173,27 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     let (middle, _) = ui.allocate_exact_size(vec2(middle_width, PLAYER - 8.0), Sense::hover());
     let current = pb.index.and_then(|i| app.queue.get(i));
     if let Some(track) = current {
-        let controls = super::account::player_controls(ui, middle, track, p, actions);
+        // ⋮ at the right end of the song: its menu, as right-clicking it.
+        let song = || super::menu::Subject::Song {
+            track: track.clone(),
+            place: super::menu::Place::Player,
+        };
+        let menu_slot = Rect::from_center_size(
+            pos2(middle.right() - 28.0, middle.center().y),
+            Vec2::splat(36.0),
+        );
+        if super::menu::dots(ui, menu_slot, Id::new("player-menu"), &track.title, p).clicked() {
+            super::menu::open(ui.ctx(), song(), menu_slot.left_top(), actions);
+        }
+        let controls = super::account::player_controls(
+            ui,
+            middle.with_max_x(menu_slot.left() - 4.0),
+            track,
+            p,
+            actions,
+        ) + middle.right()
+            - menu_slot.left()
+            + 4.0;
         let mut mid = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(
@@ -219,6 +239,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         if let Some(url) = &track.thumbnail {
             motion::origin(mid.ctx(), "player", url, art, 4.0);
         }
+        super::menu::on_secondary(&mid, &art_response, || Some(song()), actions);
         if named(art_response, "Cover")
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
@@ -259,6 +280,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
                 .sense(Sense::click())
                 .selectable(false),
             );
+            super::menu::on_secondary(ui, &title, || Some(song()), actions);
             if title
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()

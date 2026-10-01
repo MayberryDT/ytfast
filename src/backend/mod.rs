@@ -114,6 +114,9 @@ pub enum Command {
     /// Resolve songs likely to be played next (on screen when a page
     /// loads), most likely first, without delaying playback.
     PrepareMany(Vec<String>),
+    /// Search YouTube Music for Play anything (Ctrl+K): answered with
+    /// [`Event::QuickResults`], never saved to disk.
+    QuickSearch(String),
 }
 
 pub enum Event {
@@ -161,6 +164,11 @@ pub enum Event {
     Likes(Vec<(String, crate::model::LikeStatus)>),
     /// Pages to fetch again after an account change.
     AccountRefresh(Vec<Target>),
+    /// The answer to `Command::QuickSearch` for `query`.
+    QuickResults {
+        query: String,
+        result: Result<Box<Page>, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -707,6 +715,18 @@ impl Worker {
             Command::SleepTimer(choice) => self.set_sleep(choice).await,
             Command::Equalizer(equalizer) => self.set_equalizer(equalizer).await,
             Command::Normalize(on) => self.set_normalize(on).await,
+            Command::QuickSearch(query) => {
+                let client = self.client.clone();
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .search(&query, None)
+                        .await
+                        .map(|v| Box::new(parse::page(&v)))
+                        .map_err(|e| e.to_string());
+                    sink.send(Event::QuickResults { query, result });
+                });
+            }
         }
     }
 

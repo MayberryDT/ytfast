@@ -272,6 +272,16 @@ pub(super) fn row_reserve(ui: &Ui, item: &Item) -> f32 {
     }
 }
 
+/// The account's own playlist on screen and this row's entry in it, for a
+/// menu's Remove from playlist: (playlist id, entry id).
+pub(super) fn own_entry(ui: &Ui, item: &Item) -> Option<(String, String)> {
+    let s = shared(ui)?;
+    Some((
+        s.editable.clone()?,
+        item.track.as_ref()?.set_video_id.clone()?,
+    ))
+}
+
 /// A song row's controls: Like (shown while hovered, or when liked), Add to
 /// playlist, and on the account's own playlist Remove; dragging the row
 /// onto a sidebar playlist adds it there, onto another row of its own

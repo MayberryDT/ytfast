@@ -275,6 +275,9 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
         );
         play_disc(ui, center, 20.0 * pop * grow, p, play_hit);
     }
+    // ⋮ in the cover's corner, rising with the card: its menu.
+    let dots_at = art.right_top() + vec2(-22.0, 22.0);
+    let dots_hit = super::menu::card_dots(ui, dots_at, lift, hovered, item, p);
     let mut text_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_size(
@@ -306,6 +309,19 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
         .on_hover_text(item.title.as_str());
     if let (true, Some(track)) = (resting(ui, &response), &item.track) {
         actions.push(Action::Prepare(track.video_id.clone()));
+    }
+    super::menu::on_secondary(
+        ui,
+        &response,
+        || super::menu::subject_of(item, super::menu::Place::List),
+        actions,
+    );
+    if response.clicked()
+        && dots_hit
+        && let Some(subject) = super::menu::subject_of(item, super::menu::Place::List)
+    {
+        super::menu::open(ui.ctx(), subject, dots_at + vec2(-16.0, 16.0), actions);
+        return;
     }
     if response.clicked() {
         if let Some(url) = &item.thumbnail {
@@ -381,7 +397,8 @@ pub(super) fn row(
         .map(|d| format_time(f64::from(d)));
     let right = rect.right()
         - if duration.is_some() { 72.0 } else { 16.0 }
-        - super::account::row_reserve(ui, item);
+        - super::account::row_reserve(ui, item)
+        - super::menu::row_reserve(item);
     let text_rect = Rect::from_min_max(
         pos2(left, rect.top() + 8.0),
         pos2(right, rect.bottom() - 6.0),
@@ -438,7 +455,17 @@ pub(super) fn row(
         label(&mut text_ui, &item.title, 15.0, Weight::Medium, p.text);
         runs_line(&mut text_ui, &item.subtitle, 13.5, p, actions);
     }
-    if let Some(duration) = duration {
+    // The ⋮ takes the length's place while the row is under the pointer.
+    let own = super::account::own_entry(ui, item);
+    let place = || match own.clone() {
+        Some((playlist_id, set_video_id)) => super::menu::Place::Own {
+            playlist_id,
+            set_video_id,
+        },
+        None => super::menu::Place::List,
+    };
+    let dots = super::menu::row(ui, rect, &response, item, place, actions, p);
+    if let Some(duration) = duration.filter(|_| !dots) {
         ui.painter().text(
             pos2(rect.right() - 16.0, rect.center().y),
             Align2::RIGHT_CENTER,
@@ -529,6 +556,12 @@ fn top_result(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mu
             ui.set_width(ui.available_width().min(760.0));
             ui.horizontal(|ui| {
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(112.0), Sense::click());
+                super::menu::on_secondary(
+                    ui,
+                    &response,
+                    || super::menu::subject_of(item, super::menu::Place::List),
+                    actions,
+                );
                 cover(
                     ui,
                     rect,

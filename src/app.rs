@@ -167,6 +167,8 @@ pub enum Action {
     Account(crate::account::AccountAction),
     /// Show or hide the equalizer.
     ShowEqualizer(bool),
+    /// The keyboard map, context menus and Play anything (see `crate::control`).
+    Control(crate::control::ControlAction),
 }
 
 pub struct App {
@@ -244,6 +246,8 @@ pub struct App {
     pub equalizer_open: bool,
     /// The songs last prepared for being on screen.
     on_screen: Vec<String>,
+    /// Forward, mute, Play anything and pages fetched for a menu.
+    pub control: crate::control::ControlState,
 }
 
 impl App {
@@ -322,6 +326,7 @@ impl App {
             themed: false,
             equalizer_open: false,
             on_screen: Vec::new(),
+            control: Default::default(),
         };
         app.start_themes();
         app.ensure_page(View::Home.target(), false);
@@ -547,6 +552,7 @@ impl App {
             Event::AccountEdited { op, result } => self.account_edited(op, result),
             Event::Likes(likes) => self.account_likes(likes),
             Event::AccountRefresh(targets) => self.account_refresh(targets),
+            Event::QuickResults { query, result } => self.quick_results(query, result),
         }
     }
 
@@ -562,6 +568,7 @@ impl App {
         if view != self.view {
             let previous = std::mem::replace(&mut self.view, view);
             self.history.push(previous);
+            self.control.forward.clear();
             if self.history.len() > 50 {
                 self.history.remove(0);
             }
@@ -578,7 +585,8 @@ impl App {
                 if let Some(view) = self.history.pop() {
                     // The header's cover flies back to the card it came from.
                     crate::ui::motion::launch_from_origin(ctx, "header", None);
-                    self.view = view;
+                    let left = std::mem::replace(&mut self.view, view);
+                    self.control.forward.push(left);
                     self.now_playing = false;
                     self.ensure_page(self.view.target(), false);
                 }
@@ -713,6 +721,7 @@ impl App {
             Action::ToggleLikeCurrent => self.toggle_like_current(),
             Action::Account(action) => self.account_action(action),
             Action::ShowEqualizer(open) => self.equalizer_open = open,
+            Action::Control(action) => self.control_action(ctx, action),
         }
     }
 
@@ -1037,6 +1046,7 @@ impl App {
         self.theme_frame(&ctx);
         self.lyrics_frame();
         self.cover_frame(&ctx);
+        self.control_frame(&ctx);
 
         #[cfg(feature = "e2e")]
         let registry = crate::e2e::take_registry(&ctx);

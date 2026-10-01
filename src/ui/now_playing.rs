@@ -159,16 +159,25 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
         {
             actions.push(Action::Command(Command::Autoplay(autoplay)));
         }
-        if upcoming > 0 {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill(ui, "Clear", None, false, p)
+        let signed_in = matches!(app.account, crate::model::Account::SignedIn { .. });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if upcoming > 0
+                && pill(ui, "Clear", None, false, p)
                     .on_hover_text("Remove the songs after this one")
                     .clicked()
+            {
+                actions.push(Action::Command(Command::ClearUpcoming));
+            }
+            if signed_in && !app.queue.is_empty() {
+                ui.add_space(8.0);
+                if pill(ui, "Save", Some(Icon::AddToPlaylist), false, p)
+                    .on_hover_text("Save the queue as a playlist")
+                    .clicked()
                 {
-                    actions.push(Action::Command(Command::ClearUpcoming));
+                    actions.push(Action::Control(crate::control::ControlAction::SaveQueue));
                 }
-            });
-        }
+            }
+        });
     });
     ui.add_space(6.0);
     ScrollArea::vertical()
@@ -225,6 +234,9 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                     pos2(handle.right(), rect.center().y - 20.0),
                     Vec2::splat(40.0),
                 );
+                // Clear of links: where E2E runs right-click a row.
+                #[cfg(feature = "e2e")]
+                crate::e2e::register(ui.ctx(), &format!("Cover of {}", track.title), thumb);
                 cover(ui, thumb, track.thumbnail.as_deref(), false, 4, p);
                 if is_current && app.playback.playing {
                     ui.painter()
@@ -238,7 +250,7 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                     egui::UiBuilder::new()
                         .max_rect(Rect::from_min_max(
                             pos2(thumb.right() + 12.0, rect.top() + 8.0),
-                            pos2(rect.right() - 56.0, rect.bottom()),
+                            pos2(rect.right() - 80.0, rect.bottom()),
                         ))
                         .layout(Layout::top_down(Align::Min)),
                 );
@@ -284,6 +296,22 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 }
                 if remove.is_some_and(|b| b.on_hover_text("Remove from queue").clicked()) {
                     actions.push(Action::Command(Command::RemoveFromQueue(i)));
+                }
+                // Its menu: right-click, or the ⋮ beside the remove button.
+                let subject = || super::menu::Subject::Song {
+                    track: track.clone(),
+                    place: super::menu::Place::UpNext(i),
+                };
+                super::menu::on_secondary(ui, &response, || Some(subject()), actions);
+                if tools {
+                    let button = Rect::from_center_size(
+                        pos2(rect.right() - 60.0, rect.center().y),
+                        Vec2::splat(30.0),
+                    );
+                    let id = Id::new(("up-next-menu", i));
+                    if super::menu::dots(ui, button, id, &track.title, p).clicked() {
+                        super::menu::open(ui.ctx(), subject(), button.left_bottom(), actions);
+                    }
                 }
                 if named(response, &track.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)

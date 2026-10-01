@@ -5,19 +5,21 @@
 mod account;
 mod chrome;
 mod equalizer;
+mod keys;
 mod lyrics;
+mod menu;
 pub mod mini;
 pub(crate) mod motion;
 mod now_playing;
 mod pages;
+mod palette;
 mod player;
 mod settings;
 mod shelves;
 mod sleep;
 mod widgets;
 
-use crate::app::{Action, App, WindowKind};
-use crate::backend::Command;
+use crate::app::{Action, App};
 use chrome::{errors, sidebar, top_bar};
 use egui::{Frame, Margin, Ui};
 use now_playing::now_playing;
@@ -32,7 +34,7 @@ const GAP: f32 = 16.0;
 
 pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let p = app.palette.clone();
-    keyboard(app, ui, actions);
+    keys::handle(app, ui.ctx(), actions);
     account::publish(app, ui);
     if !app.queue.is_empty() {
         egui::Panel::bottom("player")
@@ -78,25 +80,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     if app.equalizer_open {
         equalizer::equalizer(app, ui.ctx(), &p, actions);
     }
-}
-
-fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
-    let typing = ui.ctx().memory(|m| m.focused().is_some());
-    ui.input(|i| {
-        if !typing && i.key_pressed(egui::Key::Space) && !app.queue.is_empty() {
-            actions.push(Action::Command(Command::TogglePause));
-        }
-        if i.key_pressed(egui::Key::Escape) && app.now_playing {
-            actions.push(Action::NowPlaying(false));
-        }
-        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
-            actions.push(Action::Back);
-        }
-        if i.modifiers.command && i.key_pressed(egui::Key::Q) {
-            actions.push(Action::Quit);
-        }
-        if i.modifiers.command && i.key_pressed(egui::Key::M) {
-            actions.push(Action::MiniPlayer(app.window == WindowKind::Main));
-        }
-    });
+    // Above everything else: a context menu, Play anything, the shortcuts.
+    menu::show(app, ui.ctx(), &p, actions);
+    palette::palette(app, ui.ctx(), &p, actions);
+    keys::overlay(app, ui.ctx(), &p, actions);
 }
