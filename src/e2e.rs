@@ -73,6 +73,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "offline" => no_connection(),
         "theme" => theme(),
         "showcase" => showcase(),
+        "account" => account(),
         _ => journey(),
     }
 }
@@ -428,6 +429,27 @@ enum Step {
     },
     Sleep(f64),
     Run(&'static str, Run),
+    /// Rests the pointer on a named control (hover-only controls appear).
+    Hover {
+        label: Label,
+        describe: String,
+    },
+    /// Presses on one named control, moves over several frames and
+    /// releases on another.
+    Drag {
+        from: Label,
+        to: Label,
+        describe: String,
+    },
+    /// Runs `refresh` every `every` seconds until `check` holds (YouTube
+    /// Music shows some account changes only after a few seconds).
+    Poll {
+        what: &'static str,
+        timeout: f64,
+        every: f64,
+        refresh: Run,
+        check: Check,
+    },
 }
 
 fn wait(what: &'static str, timeout: f64, check: impl Fn(&App) -> bool + 'static) -> Step {
@@ -464,6 +486,40 @@ fn measure(name: &'static str, value: impl Fn(&App) -> Value + 'static) -> Step 
 
 fn run(what: &'static str, f: impl Fn(&mut App) + 'static) -> Step {
     Step::Run(what, Box::new(f))
+}
+
+fn hover_with(describe: &str, label: impl Fn(&App) -> Option<String> + 'static) -> Step {
+    Step::Hover {
+        describe: describe.to_owned(),
+        label: Box::new(label),
+    }
+}
+
+fn drag_with(
+    describe: &str,
+    from: impl Fn(&App) -> Option<String> + 'static,
+    to: impl Fn(&App) -> Option<String> + 'static,
+) -> Step {
+    Step::Drag {
+        describe: describe.to_owned(),
+        from: Box::new(from),
+        to: Box::new(to),
+    }
+}
+
+fn poll(
+    what: &'static str,
+    timeout: f64,
+    refresh: impl Fn(&mut App) + 'static,
+    check: impl Fn(&App) -> bool + 'static,
+) -> Step {
+    Step::Poll {
+        what,
+        timeout,
+        every: 3.0,
+        refresh: Box::new(refresh),
+        check: Box::new(check),
+    }
 }
 
 /// A page shown and freshly loaded (not only the saved copy).
@@ -546,6 +602,583 @@ fn first_item_title(
         .flat_map(|s| &s.items)
         .find(|i| pick(i))
         .map(|i| i.title.clone())
+}
+
+// ---- account: likes, library, subscriptions, playlists ----
+
+/// Daft Punk's "Discovery" and Daft Punk: neither in the account's library
+/// nor subscriptions on 2026-10-01. The run checks that before changing
+/// anything and puts everything back.
+const E2E_ALBUM: &str = "MPREb_7ltM34kr0mH";
+const E2E_ARTIST: &str = "UCRr1xG_2WIDs18a6cIiCxeA";
+const E2E_PLAYLIST: &str = "ytfast E2E";
+const E2E_RENAMED: &str = "ytfast E2E renamed";
+const E2E_DESCRIBED: &str = "Edited by the ytfast E2E run";
+
+/// What the account scenario learns as it goes (songs picked, the new playlist).
+static FACTS: std::sync::Mutex<BTreeMap<&'static str, String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+/// When the last change was confirmed; a page counts as refetched only after it.
+static MARK: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn fact(key: &str) -> Option<String> {
+    FACTS.lock().expect("facts lock").get(key).cloned()
+}
+
+fn set_fact(key: &'static str, value: String) {
+    FACTS.lock().expect("facts lock").insert(key, value);
+}
+
+fn set_mark() {
+    *MARK.lock().expect("mark lock") = Some(Instant::now());
+}
+
+/// The page as fetched from YouTube Music after the last mark.
+fn refetched<'a>(app: &'a App, target: &Target) -> Option<&'a crate::model::Page> {
+    let mark = (*MARK.lock().expect("mark lock"))?;
+    let state = app.page_state(target)?;
+    (!state.loading && !state.cached && state.fetched.is_some_and(|f| f > mark))
+        .then_some(state.page.as_ref())
+        .flatten()
+}
+
+fn browse_ids(page: &crate::model::Page) -> Vec<String> {
+    page.shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter_map(|i| match &i.target {
+            Some(Target::Browse { id, .. }) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn song_ids(page: &crate::model::Page) -> Vec<String> {
+    page.shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter_map(|i| i.track.as_ref().map(|t| t.video_id.clone()))
+        .collect()
+}
+
+fn subscriptions() -> Target {
+    Target::browse("FEmusic_library_corpus_artists")
+}
+
+fn created_playlist() -> Option<Target> {
+    fact("playlist").map(|id| Target::browse(format!("VL{id}")))
+}
+
+fn facts(keys: &[&str]) -> Option<Vec<String>> {
+    keys.iter().map(|k| fact(k)).collect()
+}
+
+/// The created playlist's songs on the screen now.
+fn shown_rows(app: &App) -> Vec<String> {
+    created_playlist()
+        .and_then(|t| app.page_state(&t)?.page.as_ref().map(song_ids))
+        .unwrap_or_default()
+}
+
+/// The created playlist's songs as YouTube Music lists them after the mark.
+fn listed_rows(app: &App) -> Option<Vec<String>> {
+    refetched(app, &created_playlist()?).map(song_ids)
+}
+
+fn refresh_playlist(app: &mut App) {
+    if let Some(target) = created_playlist() {
+        app.ensure_page(target, true);
+    }
+}
+
+fn rated(app: &App, key: &str) -> Option<crate::model::LikeStatus> {
+    app.account_state.fetched_likes.get(&fact(key)?).copied()
+}
+
+fn ask_rating(app: &mut App, key: &str) {
+    if let Some(id) = fact(key) {
+        app.account_state.fetched_likes.remove(&id);
+        app.backend.send(Command::LikeStatus(id));
+    }
+}
+
+fn shown_like(app: &App, key: &str) -> Option<crate::model::LikeStatus> {
+    let id = fact(key)?;
+    let track = app
+        .page_state(&Target::browse(E2E_ALBUM))?
+        .page
+        .as_ref()?
+        .shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter_map(|i| i.track.as_ref())
+        .find(|t| t.video_id == id)?;
+    Some(app.account_state.marks.like(track))
+}
+
+fn header_of<'a>(app: &'a App, target: &Target) -> Option<&'a crate::model::Header> {
+    app.page_state(target)?.page.as_ref()?.header.as_ref()
+}
+
+fn dialog_open(app: &App, kind: &str) -> bool {
+    use crate::account::Dialog;
+    matches!(
+        (&app.account_state.dialog, kind),
+        (Some(Dialog::NewPlaylist { .. }), "new")
+            | (Some(Dialog::EditPlaylist { .. }), "edit")
+            | (Some(Dialog::DeletePlaylist { .. }), "delete")
+            | (Some(Dialog::AddToPlaylist { .. }), "add")
+    )
+}
+
+/// What the run may change, read from YouTube Music: saved albums,
+/// subscriptions, playlists, and the rating of the song it likes.
+fn account_snapshot(app: &App) -> Value {
+    let sorted = |target: Target| {
+        let mut ids = app
+            .page_state(&target)
+            .and_then(|s| s.page.as_ref())
+            .map(browse_ids)
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    };
+    json!({
+        "albums": sorted(LibraryTab::Albums.target()),
+        "subscriptions": sorted(subscriptions()),
+        "playlists": sorted(LibraryTab::Playlists.target()),
+        "song": fact("liked"),
+        "song_rating": rated(app, "liked").map(|r| format!("{r:?}")),
+    })
+}
+
+fn refresh_account(app: &mut App) {
+    set_mark();
+    app.ensure_page(LibraryTab::Albums.target(), true);
+    app.ensure_page(subscriptions(), true);
+    app.ensure_page(LibraryTab::Playlists.target(), true);
+    ask_rating(app, "liked");
+}
+
+fn account_refetched(app: &App) -> bool {
+    refetched(app, &LibraryTab::Albums.target()).is_some()
+        && refetched(app, &subscriptions()).is_some()
+        && refetched(app, &LibraryTab::Playlists.target()).is_some()
+        && rated(app, "liked").is_some()
+}
+
+fn idle(app: &App) -> bool {
+    !app.account_state.busy()
+}
+
+/// Likes and unlikes a song (player bar, then a row), saves and removes an
+/// album, subscribes and unsubscribes, and creates, fills (picker from a
+/// row, picker from the player bar, a drag onto the sidebar), reorders,
+/// trims, renames and deletes a playlist. Each change is confirmed by
+/// fetching the account again; the account ends as it started.
+fn account() -> Vec<Step> {
+    let album = Target::browse(E2E_ALBUM);
+    let artist = Target::browse(E2E_ARTIST);
+    vec![
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        run("open Discovery", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)))
+        }),
+        wait("album page", 60.0, current_loaded),
+        // Three songs: the first one not rated is liked and played.
+        run("pick songs", |a| {
+            let Some(page) = a
+                .page_state(&Target::browse(E2E_ALBUM))
+                .and_then(|s| s.page.as_ref())
+            else {
+                return;
+            };
+            let tracks: Vec<&crate::model::Track> = page
+                .shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter_map(|i| i.track.as_ref())
+                .collect();
+            let Some(liked) = tracks
+                .iter()
+                .find(|t| t.like == Some(crate::model::LikeStatus::Indifferent))
+            else {
+                return;
+            };
+            let mut others = tracks.iter().filter(|t| t.video_id != liked.video_id);
+            if let (Some(first), Some(third)) = (others.next(), others.next()) {
+                set_fact("liked", liked.video_id.clone());
+                set_fact("liked_title", liked.title.clone());
+                set_fact("first", first.video_id.clone());
+                set_fact("first_title", first.title.clone());
+                set_fact("third", third.video_id.clone());
+                set_fact("third_title", third.title.clone());
+            }
+        }),
+        wait("an unrated song and two more", 1.0, |_| {
+            fact("third").is_some()
+        }),
+        // Before: what the run may change.
+        run("fetch the account", refresh_account),
+        wait("account fetched", 60.0, account_refetched),
+        measure("account_before", account_snapshot),
+        run("remember it", |a| {
+            set_fact("before", account_snapshot(a).to_string())
+        }),
+        wait("song not rated", 1.0, |a| {
+            rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent)
+        }),
+        wait("album not in the library", 1.0, |a| {
+            refetched(a, &LibraryTab::Albums.target())
+                .is_some_and(|p| !browse_ids(p).iter().any(|id| id == E2E_ALBUM))
+        }),
+        wait("artist not subscribed", 1.0, |a| {
+            refetched(a, &subscriptions())
+                .is_some_and(|p| !browse_ids(p).iter().any(|id| id == E2E_ARTIST))
+        }),
+        wait("no playlist left from an earlier run", 1.0, |a| {
+            a.page_state(&LibraryTab::Playlists.target())
+                .and_then(|s| s.page.as_ref())
+                .is_some_and(|p| {
+                    !p.shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .any(|i| i.title == E2E_PLAYLIST || i.title == E2E_RENAMED)
+                })
+        }),
+        // Like from the player bar: play the song, pause before it counts as a play.
+        run("play the song", |a| {
+            let Some(page) = a
+                .page_state(&Target::browse(E2E_ALBUM))
+                .and_then(|s| s.page.as_ref())
+            else {
+                return;
+            };
+            let tracks: Vec<crate::model::Track> = page
+                .shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter_map(|i| i.track.clone())
+                .collect();
+            let start = tracks
+                .iter()
+                .position(|t| Some(&t.video_id) == fact("liked").as_ref())
+                .unwrap_or(0);
+            a.backend.send(Command::PlayTracks { tracks, start });
+        }),
+        wait("song playing", 90.0, |a| {
+            a.playback.playing && a.playback.position > 0.3 && current_id(a) == json!(fact("liked"))
+        }),
+        run("pause before ten seconds", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        wait("paused", 10.0, |a| !a.playback.playing),
+        measure("paused_at", |a| json!(a.playback.position)),
+        Step::Screenshot("account-01-not-liked"),
+        click("Like"),
+        wait("liked at once", 0.5, |a| {
+            shown_like(a, "liked") == Some(crate::model::LikeStatus::Like)
+        }),
+        Step::Screenshot("account-02-liked"),
+        wait("like accepted", 30.0, idle),
+        poll(
+            "like confirmed by a fresh watch-next",
+            30.0,
+            |a| ask_rating(a, "liked"),
+            |a| rated(a, "liked") == Some(crate::model::LikeStatus::Like),
+        ),
+        click("Open player"),
+        Step::Sleep(1.5),
+        Step::Screenshot("account-03-now-playing-liked"),
+        click("Close player"),
+        // Unlike from the song's row.
+        hover_with("the liked song's row", |_| fact("liked_title")),
+        Step::Sleep(0.5),
+        Step::Screenshot("account-04-row-liked"),
+        click_with("the row's like button", |_| {
+            fact("liked_title").map(|t| format!("Like “{t}”"))
+        }),
+        wait("unliked at once", 0.5, |a| {
+            shown_like(a, "liked") == Some(crate::model::LikeStatus::Indifferent)
+        }),
+        wait("unlike accepted", 30.0, idle),
+        poll(
+            "unlike confirmed by a fresh watch-next",
+            30.0,
+            |a| ask_rating(a, "liked"),
+            |a| rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent),
+        ),
+        // Save the album, see it in Library → Albums, remove it.
+        Step::Screenshot("account-05-album"),
+        click("Save to library"),
+        wait("saved at once", 0.5, move |a| {
+            header_of(a, &album)
+                .and_then(|h| h.library.as_ref())
+                .is_some_and(|l| a.account_state.marks.saved(l))
+        }),
+        Step::Screenshot("account-06-album-saved"),
+        wait("save accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "album listed in Library → Albums",
+            40.0,
+            |a| a.ensure_page(LibraryTab::Albums.target(), true),
+            |a| {
+                refetched(a, &LibraryTab::Albums.target())
+                    .is_some_and(|p| browse_ids(p).iter().any(|id| id == E2E_ALBUM))
+            },
+        ),
+        run("open Library → Albums", |a| {
+            a.open(View::Library(LibraryTab::Albums))
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("account-07-library-albums"),
+        run("open Discovery again", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)))
+        }),
+        wait("album page again", 60.0, current_loaded),
+        click("Remove from library"),
+        wait("removal accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "album gone from Library → Albums",
+            40.0,
+            |a| a.ensure_page(LibraryTab::Albums.target(), true),
+            |a| {
+                refetched(a, &LibraryTab::Albums.target())
+                    .is_some_and(|p| !browse_ids(p).iter().any(|id| id == E2E_ALBUM))
+            },
+        ),
+        // Subscribe to the artist, confirm, unsubscribe.
+        run("open Daft Punk", |a| {
+            a.open(View::Page(Target::browse(E2E_ARTIST)))
+        }),
+        wait("artist page", 60.0, current_loaded),
+        Step::Sleep(2.0),
+        Step::Screenshot("account-08-artist"),
+        click("Subscribe"),
+        Step::Screenshot("account-09-subscribed"),
+        wait("subscription accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "subscription confirmed",
+            40.0,
+            |a| {
+                a.ensure_page(Target::browse(E2E_ARTIST), true);
+                a.ensure_page(subscriptions(), true);
+            },
+            |a| {
+                refetched(a, &Target::browse(E2E_ARTIST))
+                    .and_then(|p| p.header.as_ref()?.subscription.as_ref())
+                    .is_some_and(|s| s.subscribed)
+                    && refetched(a, &subscriptions())
+                        .is_some_and(|p| browse_ids(p).iter().any(|id| id == E2E_ARTIST))
+            },
+        ),
+        click("Subscribed"),
+        wait("unsubscribe accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "unsubscribed",
+            40.0,
+            |a| {
+                a.ensure_page(Target::browse(E2E_ARTIST), true);
+                a.ensure_page(subscriptions(), true);
+            },
+            move |a| {
+                refetched(a, &artist)
+                    .and_then(|p| p.header.as_ref()?.subscription.as_ref())
+                    .is_some_and(|s| !s.subscribed)
+                    && refetched(a, &subscriptions())
+                        .is_some_and(|p| !browse_ids(p).iter().any(|id| id == E2E_ARTIST))
+            },
+        ),
+        // A new playlist.
+        click("Library"),
+        click("Playlists"),
+        wait("library playlists", 60.0, |a| {
+            a.view == View::Library(LibraryTab::Playlists) && current_loaded(a)
+        }),
+        click("New playlist"),
+        wait("new playlist dialog", 5.0, |a| dialog_open(a, "new")),
+        Step::Sleep(0.5),
+        Step::Type(E2E_PLAYLIST.into()),
+        click("Description"),
+        Step::Type("Made by the ytfast E2E run".into()),
+        Step::Screenshot("account-10-new-playlist"),
+        click("Create"),
+        wait("playlist created", 30.0, |a| {
+            idle(a)
+                && a.account_state
+                    .created
+                    .as_ref()
+                    .is_some_and(|(t, _)| t == E2E_PLAYLIST)
+        }),
+        run("remember the playlist", |a| {
+            if let Some((_, id)) = &a.account_state.created {
+                set_fact("playlist", id.clone());
+            }
+            set_mark();
+        }),
+        Step::Screenshot("account-11-created"),
+        poll(
+            "playlist listed in Library",
+            40.0,
+            |a| a.ensure_page(LibraryTab::Playlists.target(), true),
+            |a| {
+                let id = fact("playlist");
+                refetched(a, &LibraryTab::Playlists.target()).is_some_and(|p| {
+                    p.shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .any(|i| i.editable.is_some() && i.editable == id)
+                })
+            },
+        ),
+        // First song: a row's Add to playlist, then the picker's filter and Enter.
+        run("open Discovery for songs", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)))
+        }),
+        wait("album page for songs", 60.0, current_loaded),
+        hover_with("the first song's row", |_| fact("first_title")),
+        Step::Sleep(0.5),
+        click_with("the row's Add to playlist", |_| {
+            fact("first_title").map(|t| format!("Add “{t}” to a playlist"))
+        }),
+        wait("picker", 5.0, |a| dialog_open(a, "add")),
+        Step::Sleep(0.5),
+        Step::Type(E2E_PLAYLIST.into()),
+        Step::Sleep(0.5),
+        Step::Screenshot("account-12-picker"),
+        Step::Key(egui::Key::Enter),
+        wait("first song added", 30.0, |a| {
+            idle(a) && a.account_state.dialog.is_none()
+        }),
+        // Second: the playing song, from the player bar's picker.
+        click("Add to playlist"),
+        wait("picker from the player bar", 5.0, |a| dialog_open(a, "add")),
+        Step::Sleep(0.5),
+        click(E2E_PLAYLIST),
+        wait("second song added", 30.0, |a| {
+            idle(a) && a.account_state.dialog.is_none()
+        }),
+        // Third: dragged onto the playlist in the sidebar.
+        drag_with(
+            "a song row onto the sidebar playlist",
+            |_| fact("third_title"),
+            |_| Some(E2E_PLAYLIST.to_owned()),
+        ),
+        Step::Sleep(1.0),
+        wait("third song added", 30.0, idle),
+        run("open the playlist", |a| {
+            if let Some(target) = created_playlist() {
+                a.open(View::Page(target));
+            }
+            set_mark();
+        }),
+        poll("three songs listed", 40.0, refresh_playlist, |a| {
+            listed_rows(a) == facts(&["first", "liked", "third"])
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("account-13-three-songs"),
+        // Reorder: the third song onto the first.
+        drag_with(
+            "the last song onto the first",
+            |_| fact("third_title"),
+            |_| fact("first_title"),
+        ),
+        wait("moved at once", 2.0, |a| {
+            Some(shown_rows(a)) == facts(&["third", "first", "liked"])
+        }),
+        Step::Screenshot("account-14-moved"),
+        wait("move accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll("new order listed", 40.0, refresh_playlist, |a| {
+            listed_rows(a) == facts(&["third", "first", "liked"])
+        }),
+        // Remove one.
+        hover_with("the first song's row in the playlist", |_| {
+            fact("first_title")
+        }),
+        Step::Sleep(0.5),
+        click_with("the row's Remove", |_| {
+            fact("first_title").map(|t| format!("Remove “{t}” from the playlist"))
+        }),
+        wait("removed at once", 2.0, |a| {
+            Some(shown_rows(a)) == facts(&["third", "liked"])
+        }),
+        wait("removal from the playlist accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll("removal listed", 40.0, refresh_playlist, |a| {
+            listed_rows(a) == facts(&["third", "liked"])
+        }),
+        // Rename and describe.
+        click("Edit playlist"),
+        wait("edit dialog", 5.0, |a| dialog_open(a, "edit")),
+        Step::Sleep(0.5),
+        Step::Type(E2E_RENAMED.into()),
+        click("Description"),
+        Step::Type(E2E_DESCRIBED.into()),
+        Step::Screenshot("account-15-edit"),
+        click("Save"),
+        wait("renamed at once", 2.0, |a| {
+            created_playlist()
+                .and_then(|t| header_of(a, &t).map(|h| h.title == E2E_RENAMED))
+                .unwrap_or(false)
+        }),
+        wait("rename accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "new name and description listed",
+            40.0,
+            refresh_playlist,
+            |a| {
+                created_playlist()
+                    .and_then(|t| refetched(a, &t)?.header.clone())
+                    .is_some_and(|h| {
+                        h.title == E2E_RENAMED && h.description.as_deref() == Some(E2E_DESCRIBED)
+                    })
+            },
+        ),
+        Step::Sleep(1.0),
+        Step::Screenshot("account-16-renamed"),
+        // Delete.
+        click("Delete playlist"),
+        wait("delete dialog", 5.0, |a| dialog_open(a, "delete")),
+        Step::Screenshot("account-17-delete"),
+        click("Delete"),
+        wait("left the deleted playlist", 2.0, |a| {
+            created_playlist().is_none_or(|t| a.view != View::Page(t))
+        }),
+        wait("delete accepted", 30.0, idle),
+        run("mark", |_| set_mark()),
+        poll(
+            "playlist gone from Library",
+            40.0,
+            |a| a.ensure_page(LibraryTab::Playlists.target(), true),
+            |a| {
+                let id = fact("playlist");
+                refetched(a, &LibraryTab::Playlists.target()).is_some_and(|p| {
+                    !p.shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .any(|i| i.editable.is_some() && i.editable == id)
+                })
+            },
+        ),
+        Step::Screenshot("account-18-deleted"),
+        // After: the account as it was.
+        run("fetch the account again", refresh_account),
+        wait("account fetched again", 60.0, account_refetched),
+        measure("account_after", account_snapshot),
+        wait("account as found", 1.0, |a| {
+            fact("before") == Some(account_snapshot(a).to_string())
+        }),
+    ]
 }
 
 fn journey() -> Vec<Step> {
@@ -739,6 +1372,22 @@ enum Phase {
     Release,
 }
 
+/// The visible area of the control named `wanted` (the last match: page
+/// content is drawn after the chrome, dialogs last).
+fn find_control(
+    registry: &[(String, Rect)],
+    ctx: &egui::Context,
+    wanted: Option<&str>,
+) -> Option<Rect> {
+    let wanted = wanted?;
+    let screen = ctx.content_rect();
+    registry
+        .iter()
+        .rev()
+        .find(|(l, r)| l == wanted && screen.contains(r.center()))
+        .map(|(_, r)| *r)
+}
+
 pub struct Driver {
     dir: PathBuf,
     steps: Vec<Step>,
@@ -752,6 +1401,10 @@ pub struct Driver {
     measurements: BTreeMap<String, Value>,
     failures: Vec<String>,
     finished: bool,
+    /// A drag in progress: start, end and frame.
+    drag: Option<(Pos2, Pos2, u32)>,
+    /// When a polling step last refreshed.
+    polled: Option<Instant>,
 }
 
 impl Driver {
@@ -772,6 +1425,8 @@ impl Driver {
             measurements: BTreeMap::new(),
             failures: Vec::new(),
             finished: false,
+            drag: None,
+            polled: None,
         })
     }
 
@@ -789,6 +1444,8 @@ impl Driver {
         self.step_started = Instant::now();
         self.phase = Phase::Idle;
         self.screenshot_requested = false;
+        self.drag = None;
+        self.polled = None;
     }
 
     fn fail(&mut self, message: String) {
@@ -965,6 +1622,90 @@ impl Driver {
                 f(app);
                 self.note(&format!("run {what}"));
                 self.advance();
+            }
+            Step::Hover { label, describe } => {
+                let wanted = label(app);
+                match find_control(registry, ctx, wanted.as_deref()) {
+                    Some(rect) => {
+                        self.note(&format!("hover {describe} = {wanted:?}"));
+                        self.pending.push(Event::PointerMoved(rect.center()));
+                        self.advance();
+                    }
+                    None if elapsed > 15.0 => {
+                        self.fail(format!("no visible control named {describe} ({wanted:?})"));
+                    }
+                    None => {}
+                }
+            }
+            Step::Drag { from, to, describe } => match self.drag {
+                None => {
+                    let (a, b) = (from(app), to(app));
+                    let found = find_control(registry, ctx, a.as_deref()).zip(find_control(
+                        registry,
+                        ctx,
+                        b.as_deref(),
+                    ));
+                    match found {
+                        Some((start, end)) => {
+                            self.note(&format!("drag {describe}: {a:?} onto {b:?}"));
+                            self.pending.push(Event::PointerMoved(start.center()));
+                            self.drag = Some((start.center(), end.center(), 0));
+                        }
+                        None if elapsed > 20.0 => {
+                            self.fail(format!(
+                                "no visible controls for drag {describe} ({a:?}, {b:?})"
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                // Press, move in ten frames, rest on the target, release.
+                Some((start, end, frame)) => {
+                    const MOVES: u32 = 10;
+                    let button = |pos, pressed| Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    };
+                    match frame {
+                        0 => self.pending.push(button(start, true)),
+                        f if f <= MOVES => {
+                            let t = f as f32 / MOVES as f32;
+                            self.pending.push(Event::PointerMoved(start.lerp(end, t)));
+                        }
+                        f if f == MOVES + 1 => self.pending.push(Event::PointerMoved(end)),
+                        f if f == MOVES + 2 => self.pending.push(button(end, false)),
+                        _ => {
+                            self.pending.push(Event::PointerGone);
+                            self.advance();
+                            return;
+                        }
+                    }
+                    self.drag = Some((start, end, frame + 1));
+                }
+            },
+            Step::Poll {
+                what,
+                timeout,
+                every,
+                refresh,
+                check,
+            } => {
+                if check(app) {
+                    self.note(&format!("ok   {what} ({elapsed:.1}s)"));
+                    self.measurements
+                        .insert(format!("wait:{what}"), json!(elapsed));
+                    self.advance();
+                } else if elapsed > *timeout {
+                    self.fail(format!("timed out waiting for {what} after {timeout}s"));
+                } else if self
+                    .polled
+                    .is_none_or(|t| t.elapsed().as_secs_f64() >= *every)
+                {
+                    refresh(app);
+                    self.polled = Some(Instant::now());
+                }
             }
         }
     }

@@ -9,6 +9,7 @@
 //! queue (each play request), and mpv's playlist entry ids tell the current
 //! file's events from those of replaced or queued ones.
 
+mod account;
 mod pages;
 mod playback;
 mod session;
@@ -64,6 +65,15 @@ pub enum Command {
     Prepare(String),
     /// Use this browser profile's YouTube session from now on, and reconnect.
     UseProfile(String),
+    /// A change to the signed-in account; `op` stamps the answer. On success
+    /// the `refresh` pages are asked for again once YouTube Music shows it.
+    AccountEdit {
+        op: u64,
+        edit: crate::account::Edit,
+        refresh: Vec<Target>,
+    },
+    /// Fetch a song's rating on the account (answered with `Event::Likes`).
+    LikeStatus(String),
 }
 
 pub enum Event {
@@ -99,6 +109,15 @@ pub enum Event {
         list: Vec<crate::auth::Profile>,
         current: Option<String>,
     },
+    /// The answer to `Command::AccountEdit` number `op`.
+    AccountEdited {
+        op: u64,
+        result: Result<crate::account::Done, crate::account::Failure>,
+    },
+    /// Ratings as YouTube Music returned them: (video id, rating).
+    Likes(Vec<(String, crate::model::LikeStatus)>),
+    /// Pages to fetch again after an account change.
+    AccountRefresh(Vec<Target>),
 }
 
 #[derive(Clone)]
@@ -492,6 +511,8 @@ impl Worker {
                 let resolver = self.resolver.clone();
                 tokio::spawn(async move { resolver.prepare(&video_id).await });
             }
+            Command::AccountEdit { op, edit, refresh } => self.account_edit(op, edit, refresh),
+            Command::LikeStatus(video_id) => self.like_status(video_id),
         }
     }
 

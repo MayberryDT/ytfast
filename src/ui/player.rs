@@ -112,9 +112,14 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     let (middle, _) = ui.allocate_exact_size(vec2(middle_width, PLAYER - 8.0), Sense::hover());
     let current = pb.index.and_then(|i| app.queue.get(i));
     if let Some(track) = current {
+        let controls = super::account::player_controls(ui, middle, track, p, actions);
         let mut mid = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(middle.shrink2(vec2(24.0, 0.0)))
+                .max_rect(
+                    middle
+                        .shrink2(vec2(24.0, 0.0))
+                        .with_max_x(middle.right() - 24.0 - controls),
+                )
                 .layout(Layout::left_to_right(Align::Center)),
         );
         let (art, art_response) = mid.allocate_exact_size(Vec2::splat(48.0), Sense::click());

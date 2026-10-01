@@ -272,6 +272,8 @@ fn track_from(
         album,
         thumbnail: thumb,
         duration: duration.or_else(|| duration_in(subtitle)),
+        like: None,
+        set_video_id: None,
     }
 }
 
@@ -299,6 +301,11 @@ fn two_row(r: &Value) -> Option<Item> {
         track,
         index: None,
         stripe: None,
+        editable: r
+            .get("menu")
+            .and_then(|m| find(m, "playlistEditorEndpoint"))
+            .and_then(|e| str_at(e, &["playlistId"]))
+            .map(str::to_owned),
     })
 }
 
@@ -363,7 +370,13 @@ fn list_row(r: &Value) -> Option<Item> {
             _ => ItemKind::Video,
         };
         let duration = fixed.as_deref().and_then(parse_duration);
-        let track = track_from(id, &title, &subtitle, thumb.clone(), duration);
+        let mut track = track_from(id, &title, &subtitle, thumb.clone(), duration);
+        track.like = row_like(r);
+        // A playlist's suggested songs carry the placeholder entry id
+        // `to_be_updated_by_client` (per ytmusicapi); only real entries can be edited.
+        track.set_video_id = str_at(r, &["playlistItemData", "playlistSetVideoId"])
+            .filter(|s| *s != "to_be_updated_by_client")
+            .map(str::to_owned);
         return Some(Item {
             kind,
             title,
@@ -378,6 +391,7 @@ fn list_row(r: &Value) -> Option<Item> {
             track: Some(track),
             index,
             stripe: None,
+            editable: None,
         });
     }
     let nav = own_nav.or(title_nav);
@@ -391,6 +405,7 @@ fn list_row(r: &Value) -> Option<Item> {
         track: None,
         index,
         stripe: None,
+        editable: None,
     })
 }
 
@@ -408,6 +423,7 @@ fn nav_button(r: &Value) -> Option<Item> {
         stripe: at(r, &["solid", "leftStripeColor"])
             .and_then(Value::as_u64)
             .map(|c| c as u32),
+        editable: None,
     })
 }
 
@@ -576,6 +592,7 @@ fn section(v: &Value, page: &mut Page) -> Vec<Shelf> {
                 track,
                 index: None,
                 stripe: None,
+                editable: None,
             }],
             more: None,
             continuation: None,
@@ -700,6 +717,7 @@ fn header(v: &Value) -> Option<Header> {
             play,
             shuffle: menu_target(r, "MUSIC_SHUFFLE"),
             radio: menu_target(r, "MIX"),
+            ..Header::default()
         });
     }
     if let Some(r) = v.get("musicEditablePlaylistDetailHeaderRenderer") {
@@ -727,6 +745,7 @@ fn header(v: &Value) -> Option<Header> {
                 &["startRadioButton", "buttonRenderer", "navigationEndpoint"],
             )
             .and_then(endpoint),
+            ..Header::default()
         });
     }
     if let Some(r) = v.get("musicHeaderRenderer") {
@@ -812,6 +831,7 @@ pub fn page(v: &Value) -> Page {
     } else if let Some(list) = contents.and_then(|c| c.get("sectionListRenderer")) {
         section_list(list, &mut page);
     }
+    account_header(v, &mut page);
     fill_album_tracks(&mut page);
     page
 }
@@ -975,6 +995,7 @@ pub fn watch_next(v: &Value) -> WatchNext {
             _ => {}
         }
     }
+    out.like = watch_like(v);
     out
 }
 
@@ -1005,4 +1026,81 @@ pub fn logged_in(v: &Value) -> Option<bool> {
                 .and_then(|q| q.get("value").and_then(Value::as_str))
                 .map(|v| v == "1")
         })
+}
+
+// ---- the signed-in account's state on pages (likes, library, subscriptions, ownership) ----
+
+use crate::model::{LibraryToggle, LikeStatus, Subscription};
+
+fn like_status(v: Option<&Value>) -> Option<LikeStatus> {
+    match v?.as_str()? {
+        "LIKE" => Some(LikeStatus::Like),
+        "DISLIKE" => Some(LikeStatus::Dislike),
+        "INDIFFERENT" => Some(LikeStatus::Indifferent),
+        _ => None,
+    }
+}
+
+/// A row's rating, from the like button in its menu.
+fn row_like(r: &Value) -> Option<LikeStatus> {
+    array(at(r, &["menu", "menuRenderer", "topLevelButtons"]))
+        .iter()
+        .find_map(|b| like_status(at(b, &["likeButtonRenderer", "likeStatus"])))
+}
+
+/// The requested song's rating, from the player's like button in `next`.
+fn watch_like(v: &Value) -> Option<(String, LikeStatus)> {
+    let button = array(at(
+        v,
+        &["playerOverlays", "playerOverlayRenderer", "actions"],
+    ))
+    .iter()
+    .find_map(|a| a.get("likeButtonRenderer"))?;
+    Some((
+        str_at(button, &["target", "videoId"])?.to_owned(),
+        like_status(button.get("likeStatus"))?,
+    ))
+}
+
+/// What the account can do with the page's album, playlist or artist: the
+/// library toggle (`BOOKMARK_BORDER`, `isToggled` when saved), the artist's
+/// subscribe button, and the editable header of the account's own playlists.
+fn account_header(v: &Value, page: &mut Page) {
+    let Some(h) = page.header.as_mut() else {
+        return;
+    };
+    let tabs = at(v, &["contents", "twoColumnBrowseResultsRenderer", "tabs"]);
+    if let Some(editable) = tabs.and_then(|t| find(t, "musicEditablePlaylistDetailHeaderRenderer"))
+    {
+        h.editable = str_at(editable, &["playlistId"]).map(str::to_owned);
+    }
+    let buttons = tabs
+        .and_then(|t| find(t, "musicResponsiveHeaderRenderer"))
+        .map(|r| array(r.get("buttons")))
+        .unwrap_or(&[]);
+    h.library = buttons.iter().find_map(|b| {
+        let toggle = b.get("toggleButtonRenderer")?;
+        let id = str_at(
+            toggle,
+            &[
+                "defaultServiceEndpoint",
+                "likeEndpoint",
+                "target",
+                "playlistId",
+            ],
+        )?;
+        Some(LibraryToggle {
+            playlist_id: id.to_owned(),
+            saved: toggle.get("isToggled").and_then(Value::as_bool) == Some(true),
+        })
+    });
+    h.subscription = v
+        .get("header")
+        .and_then(|h| find(h, "subscribeButtonRenderer"))
+        .and_then(|s| {
+            Some(Subscription {
+                channel_id: s.get("channelId")?.as_str()?.to_owned(),
+                subscribed: s.get("subscribed").and_then(Value::as_bool) == Some(true),
+            })
+        });
 }

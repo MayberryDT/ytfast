@@ -32,5 +32,14 @@ fastframe_icons::icons! {
         Alert => lucide "circle-alert",
         User => lucide "user",
         Settings => lucide "settings",
+        ThumbsUp => "thumbs-up",
+        ThumbsUpFilled => "thumbs-up-filled",
+        ThumbsDown => "thumbs-down",
+        ThumbsDownFilled => "thumbs-down-filled",
+        AddToPlaylist => "list-plus",
+        Plus => lucide "plus",
+        Check => lucide "check",
+        Pencil => lucide "pencil",
+        Trash => lucide "trash-2",
     }
 }

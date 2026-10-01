@@ -126,6 +126,7 @@ pub(super) fn sidebar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Act
                     Weight::Regular,
                     p.secondary,
                 );
+                super::account::playlist_drop_target(ui, &response, rect, item, p, actions);
                 if named(response, &item.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
