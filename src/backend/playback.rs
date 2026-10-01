@@ -264,13 +264,18 @@ impl super::Worker {
 
     pub(super) async fn next(&mut self, automatic: bool) {
         let Some(pos) = self.pos else { return };
+        if self.decks.blending() {
+            if !automatic {
+                // A manual Next during a blend completes it at once.
+                self.finish_blend().await;
+                return;
+            }
+            // The song blended into ended or failed during the blend: the
+            // old one stops before the queue moves on.
+            self.stop_tail().await;
+        }
         if automatic && self.sleeping_at_song_end() {
             self.sleep_after_song().await;
-            return;
-        }
-        if !automatic && self.decks.blending() {
-            // A manual Next during a blend completes it at once.
-            self.finish_blend().await;
             return;
         }
         if pos + 1 < self.queue.len() {
@@ -599,6 +604,8 @@ impl super::Worker {
     /// unless YouTube is unreachable, in which case wait for the connection.
     async fn fail(&mut self, track: &Track, error: &str) {
         log::warn!("playback failed: {error}");
+        // A song that fails while it blends in takes the old one with it.
+        self.stop_tail().await;
         if !self.retried {
             self.retried = true;
             self.resolver.forget(&track.video_id);
@@ -754,6 +761,9 @@ impl super::Worker {
                         if let Some(mpv) = &self.mpv {
                             let _ = mpv.command(json!(["playlist-remove", 0])).await;
                         }
+                        // A short song that ends while it blends in: the old
+                        // one stops before the position starts again at 0.
+                        self.stop_tail().await;
                         self.advanced(appended).await;
                     }
                 }

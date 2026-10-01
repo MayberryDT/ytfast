@@ -464,14 +464,25 @@ impl super::Worker {
     /// Ends a blend at once: the old song stops, the new one plays at full
     /// volume, and the song after it is queued.
     pub(super) async fn finish_blend(&mut self) {
+        if self.stop_tail().await {
+            self.blend_over().await;
+        }
+    }
+
+    /// Ends a blend because the current song is changing or failing: the
+    /// old song stops and the current deck is at full volume at once, so the
+    /// blend's progress (the current song's position) can't bring the old
+    /// one back. Whatever changes the song queues the one after it.
+    pub(super) async fn stop_tail(&mut self) -> bool {
         let Some(tail) = self.decks.tail.take() else {
-            return;
+            return false;
         };
         let _ = tail.mpv.command(json!(["stop"])).await;
         if self.decks.mixes.on {
             self.decks.spare = Some(tail.mpv);
         }
-        self.blend_over().await;
+        self.apply_volumes().await;
+        true
     }
 
     /// After a blend: the new song at full volume, and the song after it

@@ -26,8 +26,9 @@
 #             covers under a light theme and back (changes the theme back)
 #   deck      Audition (Alt held over a song: main deck ducked and back, both songs
 #             moving, queue unchanged) and Smooth mixes (a radio's equal-power
-#             blend across two mpv decks; an album stays gapless on one); puts
-#             the volume, repeat, shuffle and the setting back
+#             blend across two mpv decks; Next during a blend completes it, Next
+#             again moves on; an album stays gapless on one); puts the volume,
+#             repeat, shuffle and the setting back
 #   control   the keyboard map and `?` overlay, Play anything (Ctrl+K, type, Enter
 #             timed to audible), right-click menus (Play next, Add to queue, Go to
 #             artist, Copy link), the queue saved as a playlist and deleted again;

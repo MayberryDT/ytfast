@@ -3265,6 +3265,27 @@ fn blend_report(app: &App) -> Value {
     })
 }
 
+/// Next pressed during a blend: from 0.4 s later the old song is gone, the
+/// new one plays alone at full volume, and it is still current.
+fn next_in_blend_report(app: &App) -> Value {
+    let at = clock_at("deck:next_in_blend").unwrap_or(u64::MAX);
+    let after: Vec<Value> = deck_samples()
+        .into_iter()
+        .filter(|s| sample_ms(s) >= at.saturating_add(400))
+        .collect();
+    let alone = !after.is_empty()
+        && after
+            .iter()
+            .all(|s| s["tail"].is_null() && amplitude(s, "main").is_some_and(|x| x > 0.95));
+    let stayed = current_id(app) == json!(noted("deck:radio2", "next"));
+    json!({
+        "ok": alone && stayed,
+        "tail_gone_full_volume": alone,
+        "song_stayed": stayed,
+        "samples_after": after.len(),
+    })
+}
+
 /// The album's change between its first two songs: the second one queued
 /// behind the first in the same mpv, and no blend.
 fn album_report(app: &App) -> Value {
@@ -3462,6 +3483,39 @@ fn deck() -> Vec<Step> {
             1.0,
             |a| blend_report(a)["ok"] == json!(true),
         ),
+        // Next during a blend completes it at once (the new song stays,
+        // alone at full volume); Next again moves on.
+        wait("the song after it cued", 120.0, |a| {
+            a.playback.next_ready && a.playback.duration > 40.0
+        }),
+        run("note the following songs", |a| {
+            probe(
+                "deck:radio2",
+                json!({"next": upcoming(a, 1).first(), "after": upcoming(a, 2).get(1)}),
+            );
+        }),
+        clock_mark("deck:blend2_seek"),
+        run("seek to 10 s before the end again", |a| {
+            a.backend.send(Command::Seek(a.playback.duration - 10.0));
+        }),
+        wait("a second blend under way", 30.0, |a| {
+            let seek = clock_at("deck:blend2_seek").unwrap_or(u64::MAX);
+            current_id(a) == json!(noted("deck:radio2", "next"))
+                && deck_samples()
+                    .iter()
+                    .any(|s| sample_ms(s) >= seek && !s["tail"].is_null())
+        }),
+        clock_mark("deck:next_in_blend"),
+        run("Next during the blend", |a| a.backend.send(Command::Next)),
+        Step::Sleep(1.0),
+        measure("next_during_blend", next_in_blend_report),
+        wait("Next completed the blend and kept the song", 1.0, |a| {
+            next_in_blend_report(a)["ok"] == json!(true)
+        }),
+        run("Next again", |a| a.backend.send(Command::Next)),
+        wait("Next again moved on", 30.0, |a| {
+            audible(a) && current_id(a) == json!(noted("deck:radio2", "after"))
+        }),
         // An album stays gapless with Smooth mixes on.
         run("open an album", |a| {
             a.open(View::Page(Target::browse(E2E_ALBUM)))
