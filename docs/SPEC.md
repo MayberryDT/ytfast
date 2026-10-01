@@ -38,7 +38,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 
 - Clicking a song starts it and makes the surrounding list (album, playlist, search results, shelf) its queue. Starting a mix or radio loads YouTube Music's generated queue.
 - The player bar shows cover, title, artist, a seek bar with elapsed and total time, previous, play/pause and next, plus shuffle, repeat and volume.
-- **Now Playing** expands from the player bar into a large cover view with YouTube Music's three tabs: **Up next** (the queue, including autoplay continuation when enabled), **Lyrics** (when YouTube Music has them; says so when it doesn't), and **Related**.
+- **Now Playing** expands from the player bar into a large cover view with YouTube Music's three tabs: **Up next** (the queue, including autoplay continuation when enabled), **Lyrics** (when YouTube Music has them; says so when it doesn't), and **Related**. A click anywhere on the player bar that isn't one of its controls opens Now Playing, and closes it again.
 - When the queue reaches its end with autoplay on, playback continues with YouTube Music's radio for the last track.
 - Tracks follow each other without noticeable gaps. Seeking is responsive. Upcoming tracks are prepared ahead so a normal track change doesn't wait on network resolution.
 - Quality: the highest audio format the account can get (Premium Opus ~256 kbps when offered; otherwise the best available). Settings and Now Playing show the format actually playing. Resolving a stream takes several seconds, so upcoming queue tracks and songs the pointer rests on are prepared ahead; a cold click on an unprepared song shows loading in place until it starts.
@@ -75,7 +75,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 
 ### Account
 
-- Like and dislike a song from the player bar, any row, Now Playing, the keyboard, MPRIS clients that support it, and the command line; the state shown always matches the account.
+- Like and dislike a song from the player bar, any row, Now Playing, the keyboard, MPRIS clients that support it, and the command line; the state shown always matches the account. Disliking the song that is playing moves on to the next one, as YouTube Music does.
 - Save albums and playlists to the library and remove them; subscribe to and unsubscribe from artists.
 - Create, rename, describe and delete playlists; add songs from any menu or by dragging onto a playlist; remove and reorder songs. Changes show at once and are rolled back with a plain message if YouTube Music refuses them.
 
