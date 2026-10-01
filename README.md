@@ -6,7 +6,7 @@ A native YouTube Music player for [Omarchy](https://omarchy.org), written in Rus
 
 It's built on [fastframe](https://github.com/crmne/fastframe), [Carmine Paolino](https://github.com/crmne)'s foundation for native egui apps, and follows the pattern of his [ZapFast](https://github.com/crmne/zapfast) and [Spotifast](https://github.com/crmne/spotifast): no browser engine, no telemetry, no server of its own.
 
-It's unofficial and not affiliated with YouTube or Google. It uses YouTube Music's private web API, so a change on YouTube's side can break it.
+It's unofficial and not affiliated with YouTube or Google. It uses YouTube Music's private web API, so a change on YouTube's side can break it. It talks only to YouTube and Google, and to LRCLIB for timed lyrics (sending a song's title, artist, album and length, nothing else).
 
 ## Screenshots
 
@@ -23,14 +23,27 @@ These were taken signed out, so they show public YouTube Music rather than anyon
 
 ## What it does
 
-- Home, Explore and Library, with your own shelves, playlists, songs, albums and artists
-- Search with suggestions, and album, artist and playlist pages
-- A queue, gapless playback, shuffle, repeat, radio and mixes, lyrics, and Up next
-- Audio at the best quality your account gets (Opus at about 256 kbps with YouTube Music Premium)
+The YouTube Music you know, with its own feel:
+
+- **Covers that fly.** Open an album and its cover lifts out of the card into the page; Back sends it home. Songs fly into the player, and Now Playing opens out of it.
+- **Song changes you see but never hear.** Playback is gapless; at the change the next cover and title roll into the player.
+- **Now Playing in the cover's colours**, with lyrics that follow the song line by line (from YouTube Music, or [LRCLIB](https://lrclib.net) when it has none). Click a line to jump there.
+- **Stage** (`F`): the cover, a field made from it and large lyrics fill the window. For a second screen or a party.
+- **The most replayed part**: a ridge along the seek bar shows where everyone replays a song, with a jump to the peak.
+- **Audition**: hold `Alt` (or the middle button) on any song to hear its best part over your music, which dips and comes back. Your queue never changes.
+- **Smooth mixes**: radios and mixes can blend from song to song. Albums stay gapless.
+- **Theme-painted covers**: an optional mode draws every cover in your Omarchy theme's colours.
+- **Things with weight**: cards lift, play turns into pause, carousels glide and settle on a card.
+
+And everything you'd expect:
+
+- Home (with its moods), Explore, Library (with History), search with suggestions and recent searches, album, artist and playlist pages
+- A queue you can edit: Play next, Add to queue, drag to reorder, remove, clear
+- Likes and dislikes, saving albums and playlists to your library, subscribing to artists, and creating, editing and deleting your playlists
+- Audio at the best quality your account gets (Opus at about 256 kbps with YouTube Music Premium), levelled between songs, with a ten-band equalizer and a sleep timer
+- Songs on screen are prepared before you click them, so they start at once; Music reopens where you left off
 - Plays count in your YouTube Music history, so your recommendations keep learning
 - Media keys, `playerctl` and the Omarchy bar's media widget (MPRIS), playing on after you close the window, a command line, a mini player, and song-change notifications if you want them
-
-It doesn't change anything else in your account: no likes, no playlist editing.
 
 ## On the desktop
 
@@ -87,7 +100,7 @@ The release build takes several minutes and a few GB of memory. Logs go to `~/.c
 
 [docs/SPEC.md](docs/SPEC.md) describes the product: what each screen does and what's deliberately left out. [docs/integration.md](docs/integration.md) has the verified facts it relies on (cookie decryption, YouTube's API, stream formats) and the design. [AGENTS.md](AGENTS.md) holds the rules for coding agents, and for people too.
 
-`scripts/e2e.sh [journey|recovery|offline|theme|showcase|desktop]` builds with the `e2e` feature and drives the real app on your desktop. All but `showcase` use your signed-in account and leave screenshots, logs and a summary in `artifacts/e2e/`, which git ignores because they show account data. `showcase` runs signed out and takes the pictures above. `desktop` also needs `playerctl` and a notification daemon.
+`scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|surfaces|deck]` builds with the `e2e` feature and drives the real app on your desktop. All but `showcase` use your signed-in account and leave screenshots, logs and a summary in `artifacts/e2e/`, which git ignores because they show account data. `showcase` runs signed out and takes the pictures above. `desktop` also needs `playerctl` and a notification daemon. `account` changes your account and puts it back; `engine` must be followed by `engine-restore`.
 
 Issues and pull requests are welcome.
 
