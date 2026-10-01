@@ -1,6 +1,7 @@
+use super::motion;
 use super::pages::skeleton_shelf;
 use super::shelves::shelf_view;
-use super::widgets::{cover, font, label, named, runs_line, track_line};
+use super::widgets::{cover, font, label, landing_cover, named, runs_line, track_line};
 use crate::app::{Action, App, NowPlayingTab};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -25,14 +26,11 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         pos2(art_area.center().x, art_area.top() + size / 2.0 + 8.0),
         Vec2::splat(size),
     );
-    cover(
-        ui,
-        art,
-        current.and_then(|t| t.thumbnail.as_deref()),
-        false,
-        8,
-        p,
-    );
+    let url = current.and_then(|t| t.thumbnail.as_deref());
+    landing_cover(ui, Id::new("now-playing-cover"), art, url, false, 8, p);
+    if let Some(url) = url {
+        motion::origin(ui.ctx(), "now-playing", url, art, 8.0);
+    }
     if let Some(track) = current {
         let mut below = ui.new_child(
             egui::UiBuilder::new()

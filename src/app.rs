@@ -426,6 +426,8 @@ impl App {
             Action::Open(view) => self.open(view),
             Action::Back => {
                 if let Some(view) = self.history.pop() {
+                    // The header's cover flies back to the card it came from.
+                    crate::ui::motion::launch_from_origin(ctx, "header");
                     self.view = view;
                     self.now_playing = false;
                     self.ensure_page(self.view.target(), false);
@@ -467,7 +469,15 @@ impl App {
                     }));
                 }
             }
-            Action::NowPlaying(open) => self.now_playing = open && !self.queue.is_empty(),
+            Action::NowPlaying(open) => {
+                let open = open && !self.queue.is_empty();
+                match (self.now_playing, open) {
+                    (false, true) => crate::ui::motion::launch_from_origin(ctx, "player"),
+                    (true, false) => crate::ui::motion::launch_from_origin(ctx, "now-playing"),
+                    _ => {}
+                }
+                self.now_playing = open;
+            }
             Action::NowPlayingTab(tab) => self.now_playing_tab = tab,
             Action::Load(target) => self.ensure_page(target, false),
             Action::Retry(key) => {

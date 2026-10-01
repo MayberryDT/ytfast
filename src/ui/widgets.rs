@@ -217,6 +217,30 @@ pub(super) fn cover(
     }
 }
 
+/// A cover at a place covers fly to (page header, player, Now Playing,
+/// cards on the way back): while one is landing here, only its frame shows.
+pub(super) fn landing_cover(
+    ui: &mut Ui,
+    site: egui::Id,
+    rect: Rect,
+    url: Option<&str>,
+    round: bool,
+    radius: u8,
+    p: &Palette,
+) {
+    let corner = if round {
+        rect.width() / 2.0
+    } else {
+        f32::from(radius)
+    };
+    if super::motion::land(ui, site, url, rect, corner) {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(corner.min(255.0) as u8), p.surface);
+    } else {
+        cover(ui, rect, url, round, radius, p);
+    }
+}
+
 pub(super) fn play_disc(ui: &mut Ui, center: egui::Pos2, radius: f32, p: &Palette, hovered: bool) {
     let fill = if hovered { p.accent_hover } else { p.accent };
     ui.painter().circle_filled(center, radius, fill);

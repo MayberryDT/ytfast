@@ -1,5 +1,6 @@
+use super::motion;
 use super::shelves::shelf_view;
-use super::widgets::{chip, cover, font, label, pill, resting, runs_line};
+use super::widgets::{chip, font, label, landing_cover, pill, resting, runs_line};
 use super::{CARD, GAP};
 use crate::app::{Action, App, LibraryTab, PageState, View};
 use crate::icons::Icon;
@@ -9,6 +10,8 @@ use egui::{CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense, Ui, V
 use fastframe_fonts::Weight;
 
 pub(super) fn content(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
+    // The header registers its cover again below if this page has one.
+    motion::clear_origin(ui.ctx(), "header");
     let target = app.view.target();
     let key = target.key();
     let mut scroll = ScrollArea::vertical()
@@ -251,7 +254,12 @@ fn page_header(ui: &mut Ui, h: &Header, page: &Page, p: &Palette, actions: &mut 
     ui.horizontal_top(|ui| {
         let size = 232.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-        cover(ui, rect, h.thumbnail.as_deref(), h.round, 8, p);
+        let site = egui::Id::new("page-header-cover");
+        landing_cover(ui, site, rect, h.thumbnail.as_deref(), h.round, 8, p);
+        if let Some(url) = &h.thumbnail {
+            let radius = if h.round { size / 2.0 } else { 8.0 };
+            motion::origin(ui.ctx(), "header", url, rect, radius);
+        }
         ui.add_space(28.0);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width().min(720.0));

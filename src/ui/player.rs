@@ -1,5 +1,8 @@
 use super::PLAYER;
-use super::widgets::{cover, font, icon_button, label, named, named_as, runs_line, track_line};
+use super::motion;
+use super::widgets::{
+    cover, font, icon_button, label, landing_cover, named, named_as, runs_line, track_line,
+};
 use crate::app::{Action, App};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -117,8 +120,42 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
                 .max_rect(middle.shrink2(vec2(24.0, 0.0)))
                 .layout(Layout::left_to_right(Align::Center)),
         );
+        mid.set_clip_rect(middle.intersect(mid.clip_rect()));
         let (art, art_response) = mid.allocate_exact_size(Vec2::splat(48.0), Sense::click());
-        cover(&mut mid, art, track.thumbnail.as_deref(), false, 4, p);
+        // The handoff: at a song change the new cover and title roll in from
+        // below while the old ones leave upwards.
+        let handoff = motion::changed(mid.ctx(), Id::new("player-handoff"), &track.video_id, 0.5)
+            .map(|(previous, t)| (previous, motion::ease_out(t)));
+        let shift = handoff.as_ref().map_or(0.0, |(_, k)| 1.0 - k);
+        let previous = handoff
+            .as_ref()
+            .and_then(|(id, _)| app.queue.iter().find(|t| &t.video_id == id));
+        if let (Some(old), Some((_, k))) = (previous, &handoff) {
+            let mut fading =
+                mid.new_child(egui::UiBuilder::new().max_rect(motion::offset(art, 0.0, -0.9 * k)));
+            fading.multiply_opacity(1.0 - k);
+            cover(
+                &mut fading,
+                motion::offset(art, 0.0, -0.9 * k),
+                old.thumbnail.as_deref(),
+                false,
+                4,
+                p,
+            );
+        }
+        let art_now = motion::offset(art, 0.0, 0.9 * shift);
+        landing_cover(
+            &mut mid,
+            Id::new("player-cover"),
+            art_now,
+            track.thumbnail.as_deref(),
+            false,
+            4,
+            p,
+        );
+        if let Some(url) = &track.thumbnail {
+            motion::origin(mid.ctx(), "player", url, art, 4.0);
+        }
         if named(art_response, "Cover")
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
@@ -126,8 +163,29 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
             actions.push(Action::NowPlaying(!app.now_playing));
         }
         mid.add_space(12.0);
-        mid.vertical(|ui| {
-            ui.add_space(4.0);
+        let text_area = Rect::from_min_max(
+            pos2(mid.cursor().left(), middle.top()),
+            pos2(middle.right() - 24.0, middle.bottom()),
+        );
+        if let (Some(old), Some((_, k))) = (previous, &handoff) {
+            let mut leaving = mid.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(text_area.translate(vec2(0.0, -18.0 * k)))
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            leaving.multiply_opacity(1.0 - k);
+            leaving.add_space(18.0);
+            label(&mut leaving, &old.title, 15.0, Weight::SemiBold, p.text);
+        }
+        let mut block = mid.new_child(
+            egui::UiBuilder::new()
+                .max_rect(text_area.translate(vec2(0.0, 18.0 * shift)))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        block.multiply_opacity(1.0 - shift);
+        let ui = &mut block;
+        {
+            ui.add_space(18.0);
             let title = ui.add(
                 egui::Label::new(
                     RichText::new(&track.title)
@@ -145,7 +203,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
                 actions.push(Action::NowPlaying(!app.now_playing));
             }
             runs_line(ui, &track_line(track), 13.5, p, actions);
-        });
+        }
     }
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         let chevron = if app.now_playing {

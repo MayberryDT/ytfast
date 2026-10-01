@@ -3,6 +3,7 @@
 //! Views read [`App`] and push [`Action`]s.
 
 mod chrome;
+pub(crate) mod motion;
 mod now_playing;
 mod pages;
 mod player;
@@ -59,8 +60,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     egui::CentralPanel::no_frame().show(ui, |ui| {
         ui.painter().rect_filled(ui.max_rect(), 0.0, p.window);
         if app.now_playing {
+            motion::clear_origin(ui.ctx(), "header");
             now_playing(app, ui, &p, actions);
         } else {
+            motion::clear_origin(ui.ctx(), "now-playing");
             content(app, ui, &p, actions);
         }
         errors(app, ui, &p, actions);

@@ -73,8 +73,112 @@ fn scenario(name: &str) -> Vec<Step> {
         "offline" => no_connection(),
         "theme" => theme(),
         "showcase" => showcase(),
+        "motion" => motion(),
         _ => journey(),
     }
+}
+
+/// Frames taken back to back (about every other frame) while something moves.
+fn burst(names: &'static [&'static str]) -> Vec<Step> {
+    names.iter().map(|n| Step::Screenshot(n)).collect()
+}
+
+/// The signature motion: a cover flies into its page and back, a song's
+/// cover flies to the player, the player hands off to the next song, and
+/// Now Playing opens from and closes into the player's cover.
+fn motion() -> Vec<Step> {
+    let home = View::Home.target();
+    let home2 = home.clone();
+    let mut steps = vec![
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 2)),
+        Step::Sleep(3.0),
+        Step::Screenshot("00-home"),
+        click_with("an album or playlist card on Home", move |a| {
+            first_item_title(a, &home2, |i| {
+                matches!(
+                    i.kind,
+                    crate::model::ItemKind::Album | crate::model::ItemKind::Playlist
+                ) && i.thumbnail.is_some()
+            })
+        }),
+    ];
+    steps.extend(burst(&[
+        "01-open-a",
+        "01-open-b",
+        "01-open-c",
+        "01-open-d",
+        "01-open-e",
+        "01-open-f",
+    ]));
+    steps.extend([
+        wait("page", 60.0, current_loaded),
+        Step::Sleep(1.0),
+        Step::Screenshot("02-page"),
+        click("Back"),
+    ]);
+    steps.extend(burst(&[
+        "03-back-a",
+        "03-back-b",
+        "03-back-c",
+        "03-back-d",
+        "03-back-e",
+    ]));
+    let home3 = View::Home.target();
+    steps.extend([
+        Step::Sleep(1.5),
+        click_with("a song on Home", move |a| {
+            first_item_title(a, &home3, |i| i.track.is_some() && i.thumbnail.is_some())
+        }),
+    ]);
+    steps.extend(burst(&[
+        "04-play-a",
+        "04-play-b",
+        "04-play-c",
+        "04-play-d",
+        "04-play-e",
+    ]));
+    steps.extend([
+        wait("playing", 60.0, |a| a.playback.playing),
+        Step::Sleep(2.0),
+        Step::Screenshot("05-playing"),
+        click("Next"),
+    ]);
+    steps.extend(burst(&[
+        "06-handoff-a",
+        "06-handoff-b",
+        "06-handoff-c",
+        "06-handoff-d",
+        "06-handoff-e",
+    ]));
+    steps.extend([Step::Sleep(1.0), click("Cover")]);
+    steps.extend(burst(&[
+        "07-np-open-a",
+        "07-np-open-b",
+        "07-np-open-c",
+        "07-np-open-d",
+        "07-np-open-e",
+    ]));
+    steps.extend([
+        Step::Sleep(1.0),
+        Step::Screenshot("08-now-playing"),
+        click("Close player"),
+    ]);
+    steps.extend(burst(&[
+        "09-np-close-a",
+        "09-np-close-b",
+        "09-np-close-c",
+        "09-np-close-d",
+    ]));
+    steps.extend([
+        Step::Sleep(1.0),
+        run("pause", |a| {
+            if a.playback.playing {
+                a.backend.send(crate::backend::Command::TogglePause);
+            }
+        }),
+        Step::Sleep(1.0),
+    ]);
+    steps
 }
 
 /// An expired browser session, then Reconnect once the browser has a valid

@@ -1,5 +1,7 @@
+use super::motion;
 use super::widgets::{
-    cover, font, icon_button, label, named, pill, play_disc, resting, runs_line, runs_text,
+    cover, font, icon_button, label, landing_cover, named, pill, play_disc, resting, runs_line,
+    runs_text,
 };
 use super::{CARD, GAP};
 use crate::app::Action;
@@ -154,20 +156,51 @@ fn remember_width(ui: &Ui, scroll_id: Id, width: f32) {
 fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<Action>) {
     let round = item.kind == ItemKind::Artist;
     let (rect, response) = ui.allocate_exact_size(vec2(CARD, CARD + 58.0), Sense::click());
-    let art = Rect::from_min_size(rect.min, Vec2::splat(CARD));
-    cover(ui, art, item.thumbnail.as_deref(), round, 6, p);
     let hovered = response.hovered();
+    // The cover rises a little under the pointer, with weight.
+    let lift = motion::lift(ui, response.id, hovered);
+    let art = Rect::from_min_size(rect.min, Vec2::splat(CARD))
+        .expand(3.0 * lift)
+        .translate(vec2(0.0, -3.0 * lift));
+    let radius = if round { CARD / 2.0 } else { 6.0 };
+    if lift > 0.01 {
+        let shadow = egui::epaint::Shadow {
+            offset: [0, (8.0 * lift) as i8],
+            blur: (22.0 * lift) as u8,
+            spread: 0,
+            color: p.shadow.gamma_multiply(lift),
+        };
+        ui.painter()
+            .add(shadow.as_shape(art, CornerRadius::same(radius as u8)));
+    }
+    landing_cover(ui, response.id, art, item.thumbnail.as_deref(), round, 6, p);
     let playable = item.play.is_some() || item.track.is_some();
     let mut play_hit = false;
-    if hovered && !round {
-        ui.painter()
-            .rect_filled(art, CornerRadius::same(6), p.overlay.gamma_multiply(0.45));
+    if lift > 0.01 && !round {
+        ui.painter().rect_filled(
+            art,
+            CornerRadius::same(6),
+            p.overlay.gamma_multiply(0.45 * lift),
+        );
     }
-    if hovered && playable {
+    // The play disc pops in rather than appearing.
+    let pop = motion::spring(
+        ui.ctx(),
+        response.id.with("pop"),
+        if hovered && playable { 1.0 } else { 0.0 },
+        420.0,
+    );
+    if pop > 0.02 {
         let center = art.right_bottom() - vec2(30.0, 30.0);
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        play_hit = pointer.is_some_and(|pos| pos.distance(center) < 20.0);
-        play_disc(ui, center, 20.0, p, play_hit);
+        play_hit = hovered && pointer.is_some_and(|pos| pos.distance(center) < 20.0);
+        let grow = motion::spring(
+            ui.ctx(),
+            response.id.with("disc"),
+            if play_hit { 1.12 } else { 1.0 },
+            500.0,
+        );
+        play_disc(ui, center, 20.0 * pop * grow, p, play_hit);
     }
     let mut text_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -202,6 +235,9 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
         actions.push(Action::Prepare(track.video_id.clone()));
     }
     if response.clicked() {
+        if let Some(url) = &item.thumbnail {
+            motion::launch(ui.ctx(), url, art, radius);
+        }
         if play_hit {
             play_item(item, shelf, actions)
         } else {
@@ -337,6 +373,18 @@ pub(super) fn row(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
+        // A song's cover flies from its row to the player.
+        let thumb = Rect::from_min_size(
+            pos2(rect.left() + 8.0, rect.center().y - 20.0),
+            Vec2::splat(40.0),
+        );
+        if let Some(url) = item
+            .thumbnail
+            .as_deref()
+            .or(item.track.as_ref().and_then(|t| t.thumbnail.as_deref()))
+        {
+            motion::launch(ui.ctx(), url, thumb, 4.0);
+        }
         activate(item, shelf, actions);
     }
 }
