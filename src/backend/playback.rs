@@ -45,6 +45,9 @@ impl super::Worker {
     /// Applies a queue edit. The current song stays current wherever it
     /// moves; if the song after it changed, the one queued in mpv behind
     /// it is dropped and the new next one is prepared and queued instead.
+    /// An edit never fetches autoplay's radio: songs removed or cleared
+    /// stay gone, and autoplay continues when the last song ends
+    /// ([`Self::next`]), as in YouTube Music.
     pub(super) async fn edit_queue(
         &mut self,
         edit: impl FnOnce(&mut queue::Queue, Option<usize>, bool),
@@ -61,7 +64,6 @@ impl super::Worker {
         }
         self.send_queue();
         self.emit(true);
-        self.maybe_extend();
     }
 
     /// Play next (`next`) or Add to queue. With nothing to play yet, the

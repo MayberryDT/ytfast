@@ -2471,13 +2471,19 @@ fn sleep_choice(app: &App) -> Option<crate::model::Sleep> {
     app.playback.sleep.map(|s| s.choice)
 }
 
+/// Up next holds nothing after the current song.
+fn only_current(app: &App) -> bool {
+    app.playback.index.is_some_and(|i| app.queue.len() == i + 1)
+}
+
 /// Control (docs/SPEC.md § Control) through the real app: how soon a cold
 /// click starts an unprepared song and a prepared one; Play next, Add to
 /// queue, a reorder and a remove in Up next, then the songs playing in the
 /// order shown; an equalizer preset, its bypass and loudness levelling as
 /// mpv has them; the sleep timer at a song's end and after a minute, with
-/// its fade. It ends paused at a known place with a known volume and writes
-/// what `engine-restore` (the next launch) must find.
+/// its fade; Clear in Up next staying clear until autoplay continues at the
+/// song's end. It ends paused at a known place with a known volume and
+/// writes what `engine-restore` (the next launch) must find.
 fn engine() -> Vec<Step> {
     use crate::model::Sleep;
     vec![
@@ -2730,6 +2736,42 @@ fn engine() -> Vec<Step> {
         }),
         measure("sleep_fade_volumes", |_| probed("sleep_fade")),
         measure("sleep_stopped", |_| probed("sleep_stopped")),
+        // Clear in Up next: the songs after the current one go and stay
+        // gone; autoplay carries on only when the song ends.
+        wait("songs after the current one", 1.0, |a| {
+            !upcoming(a, 1).is_empty()
+        }),
+        click("Clear"),
+        wait("only the current song left", 5.0, only_current),
+        Step::Sleep(3.0),
+        measure(
+            "queue_after_clear",
+            |a| json!({"length": a.queue.len(), "index": a.playback.index, "autoplay": a.playback.autoplay}),
+        ),
+        wait("still only the current song 3 s later", 1.0, only_current),
+        Step::Screenshot("e07-cleared"),
+        run("play the cleared queue's last seconds", |a| {
+            probe("engine:cleared", current_id(a));
+            if !a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+            let end = (a.playback.duration - 6.0).max(0.0);
+            a.backend.send(Command::Seek(end));
+        }),
+        wait("autoplay continues after the last song", 90.0, |a| {
+            !a.playback.autoplay
+                || (audible(a) && current_id(a) != probed("engine:cleared") && a.queue.len() > 1)
+        }),
+        measure(
+            "after_clear",
+            |a| json!({"autoplay": a.playback.autoplay, "song": current_id(a), "queue_length": a.queue.len()}),
+        ),
+        run("pause", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        wait("paused", 10.0, |a| !a.playback.playing),
         // A session for the next launch: paused at 42 s with volume 63.
         run("volume 63, then 42 s into the song", |a| {
             a.backend.send(Command::Volume(63.0));
