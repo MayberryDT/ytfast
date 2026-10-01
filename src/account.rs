@@ -597,7 +597,16 @@ impl App {
                         editable: None,
                     };
                     match page.shelves.first_mut() {
-                        Some(shelf) => shelf.items.insert(0, card),
+                        // YouTube Music lists a new playlist first among the
+                        // account's own, after the automatic ones.
+                        Some(shelf) => {
+                            let at = shelf
+                                .items
+                                .iter()
+                                .position(|i| i.editable.is_some())
+                                .unwrap_or(shelf.items.len().min(2));
+                            shelf.items.insert(at, card);
+                        }
                         None => page.shelves.push(Shelf {
                             title: String::new(),
                             strapline: None,
