@@ -5,13 +5,17 @@ pub mod auth;
 pub mod backend;
 pub mod colors;
 pub mod covers;
+pub mod desktop;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 pub mod icons;
 pub mod innertube;
+pub mod links;
 pub mod lyrics;
 pub mod model;
+pub mod mpris;
 pub mod mpv;
+pub mod notify;
 pub mod parse;
 pub mod paths;
 pub mod resolver;

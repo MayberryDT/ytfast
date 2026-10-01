@@ -4,6 +4,7 @@
 
 mod chrome;
 mod lyrics;
+pub mod mini;
 pub(crate) mod motion;
 mod now_playing;
 mod pages;
@@ -12,7 +13,7 @@ mod settings;
 mod shelves;
 mod widgets;
 
-use crate::app::{Action, App};
+use crate::app::{Action, App, WindowKind};
 use crate::backend::Command;
 use chrome::{errors, sidebar, top_bar};
 use egui::{Frame, Margin, Ui};
@@ -82,6 +83,12 @@ fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
         }
         if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
             actions.push(Action::Back);
+        }
+        if i.modifiers.command && i.key_pressed(egui::Key::Q) {
+            actions.push(Action::Quit);
+        }
+        if i.modifiers.command && i.key_pressed(egui::Key::M) {
+            actions.push(Action::MiniPlayer(app.window == WindowKind::Main));
         }
     });
 }

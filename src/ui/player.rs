@@ -168,7 +168,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     );
 
     // Right side first, so the middle gets what is left.
-    let right_width = 300.0;
+    let right_width = 340.0;
     let middle_width = (ui.available_width() - right_width).max(160.0);
     let (middle, _) = ui.allocate_exact_size(vec2(middle_width, PLAYER - 8.0), Sense::hover());
     let current = pb.index.and_then(|i| app.queue.get(i));
@@ -284,6 +284,9 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         .clicked()
         {
             actions.push(Action::NowPlaying(!app.now_playing));
+        }
+        if icon_button(ui, Icon::MiniPlayer, 20.0, p.secondary, p, "Mini player").clicked() {
+            actions.push(Action::MiniPlayer(true));
         }
         let shuffle_color = if pb.shuffle { p.accent } else { p.secondary };
         if icon_button(

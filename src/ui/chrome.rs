@@ -189,7 +189,13 @@ fn search_box(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>
     #[cfg(feature = "e2e")]
     crate::e2e::register(&response.ctx, "Search", response.interact_rect);
     if response.changed() {
-        app.search_changed();
+        // A pasted link opens at once, without Enter.
+        let pasted = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        if pasted && crate::links::target_from_link(&app.search).is_some() {
+            actions.push(Action::Search(app.search.clone()));
+        } else {
+            app.search_changed();
+        }
     }
     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         actions.push(Action::Search(app.search.clone()));

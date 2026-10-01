@@ -74,6 +74,8 @@ pub enum Command {
     Prepare(String),
     /// Use this browser profile's YouTube session from now on, and reconnect.
     UseProfile(String),
+    /// Settings: song-change notifications on or off (saved for next time).
+    Notifications(bool),
 }
 
 pub enum Event {
@@ -118,10 +120,13 @@ pub enum Event {
 struct Sink {
     tx: std::sync::mpsc::Sender<Event>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// The desktop integration's copy of the queue and playback state.
+    now: Arc<tokio::sync::watch::Sender<crate::desktop::Now>>,
 }
 
 impl Sink {
     fn send(&self, event: Event) {
+        crate::desktop::observe(&self.now, &event);
         let _ = self.tx.send(event);
         (self.wake)();
     }
@@ -132,6 +137,9 @@ pub struct Backend {
     pub events: std::sync::mpsc::Receiver<Event>,
     pub http: reqwest::Client,
     pub runtime: tokio::runtime::Handle,
+    /// The queue and playback state as last sent, for MPRIS, notifications
+    /// and the command line (which work with no window open).
+    pub now: tokio::sync::watch::Receiver<crate::desktop::Now>,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -144,9 +152,11 @@ impl Backend {
             .build()?;
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (tx, events) = std::sync::mpsc::channel();
+        let (now_tx, now) = tokio::sync::watch::channel(crate::desktop::Now::default());
         let sink = Sink {
             tx,
             wake: Arc::new(wake),
+            now: Arc::new(now_tx),
         };
         let client = Arc::new(Client::new());
         let http = client.http().clone();
@@ -157,12 +167,18 @@ impl Backend {
             events,
             http,
             runtime: runtime.handle().clone(),
+            now,
             _runtime: runtime,
         })
     }
 
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    /// A sender for backend commands from other threads (MPRIS, the command line).
+    pub fn commands(&self) -> mpsc::UnboundedSender<Command> {
+        self.commands.clone()
     }
 }
 
@@ -508,15 +524,23 @@ impl Worker {
             }
             Command::Reconnect => self.connect(),
             Command::UseProfile(profile) => {
-                let settings = crate::settings::Settings {
-                    browser_profile: Some(profile),
-                };
+                let mut settings = crate::settings::Settings::load(&self.paths);
+                settings.browser_profile = Some(profile);
                 if let Err(error) = settings.save(&self.paths) {
                     self.sink.send(Event::Error(format!(
                         "Couldn't save the account choice: {error}"
                     )));
                 }
                 self.connect();
+            }
+            Command::Notifications(on) => {
+                let mut settings = crate::settings::Settings::load(&self.paths);
+                settings.notifications = on;
+                if let Err(error) = settings.save(&self.paths) {
+                    self.sink.send(Event::Error(format!(
+                        "Couldn't save the notification setting: {error}"
+                    )));
+                }
             }
             Command::Prepare(video_id) => {
                 let resolver = self.resolver.clone();
