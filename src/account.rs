@@ -283,14 +283,23 @@ impl AccountState {
             })
     }
 
-    /// Forgets page changes that YouTube Music has had time to list.
+    /// Forgets page changes that YouTube Music has had time to list. Their
+    /// pages as sent take them in (YouTube Music accepted them), and pages
+    /// as sent that no change still in force draws on are dropped.
     fn expire_overlays(&mut self) {
         let pending = &self.pending;
-        self.overlays
-            .retain(|o| pending.contains_key(&o.op) || o.made.elapsed() <= TRUST_LOCAL);
-        if self.overlays.is_empty() {
-            self.bases.clear();
+        let (live, expired): (Vec<Overlay>, Vec<Overlay>) = std::mem::take(&mut self.overlays)
+            .into_iter()
+            .partition(|o| pending.contains_key(&o.op) || o.made.elapsed() <= TRUST_LOCAL);
+        for overlay in &expired {
+            for (key, base) in &mut self.bases {
+                overlay.edit.apply(key, base);
+            }
         }
+        self.overlays = live;
+        let overlays = &self.overlays;
+        self.bases
+            .retain(|key, base| overlays.iter().any(|o| o.edit.affects(key, base)));
     }
 
     /// Shows for `id` the newest change on its way, else what YouTube
@@ -1106,16 +1115,25 @@ impl App {
                                     shelf: Some(plan.shelf),
                                 });
                             }
-                            self.account_state.deferred_move = Some(DeferredMove {
+                            let replaced = self.account_state.deferred_move.replace(DeferredMove {
                                 key: plan.key,
                                 rows: plan.rows,
                                 title: plan.title,
                                 action: AccountAction::Move {
                                     playlist_id,
-                                    set_video_id,
+                                    set_video_id: set_video_id.clone(),
                                     onto,
                                 },
                             });
+                            // A newer drag of the same song simply wins.
+                            if let Some(old) = replaced
+                                && old.moved() != Some(set_video_id.as_str())
+                            {
+                                self.push_error(format!(
+                                    "Didn't move {}: you moved another song before the rest of the playlist loaded. Try again.",
+                                    quoted(&old.title)
+                                ));
+                            }
                             return;
                         }
                         None => None,
@@ -1341,6 +1359,33 @@ impl App {
             }
         }
         self.apply_overlays(key);
+        // A move waiting on this playlist's next part: the page was replaced,
+        // so the part it asked for won't arrive. Plan it again on this copy
+        // (it asks for the next part again if it still needs it).
+        if self
+            .account_state
+            .deferred_move
+            .as_ref()
+            .is_some_and(|d| d.key == key)
+            && let Some(deferred) = self.account_state.deferred_move.take()
+        {
+            let listed = |entry: &str| {
+                self.pages
+                    .get(key)
+                    .and_then(|s| s.page.as_ref())
+                    .and_then(entries)
+                    .is_some_and(|s| s.items.iter().any(|i| entry_of(i) == Some(entry)))
+            };
+            match &deferred.action {
+                AccountAction::Move {
+                    set_video_id, onto, ..
+                } if listed(set_video_id) && listed(onto) => self.account_action(deferred.action),
+                _ => self.push_error(format!(
+                    "Couldn't move {}: the playlist changed while it loaded. Try again.",
+                    quoted(&deferred.title)
+                )),
+            }
+        }
     }
 
     /// More rows of a page arrived: a move waiting for the rows after the
@@ -1394,4 +1439,14 @@ struct DeferredMove {
     rows: usize,
     title: String,
     action: AccountAction,
+}
+
+impl DeferredMove {
+    /// The entry being moved.
+    fn moved(&self) -> Option<&str> {
+        match &self.action {
+            AccountAction::Move { set_video_id, .. } => Some(set_video_id),
+            _ => None,
+        }
+    }
 }
