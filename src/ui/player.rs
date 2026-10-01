@@ -101,11 +101,13 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         actions.push(Action::Command(Command::Next));
     }
     ui.add_space(8.0);
-    label(
-        ui,
+    // A fixed slot, so the song beside it doesn't shift as the digits change.
+    let (time, _) = ui.allocate_exact_size(vec2(104.0, 20.0), Sense::hover());
+    ui.painter().text(
+        time.left_center(),
+        egui::Align2::LEFT_CENTER,
         format!("{} / {}", format_time(shown), format_time(duration)),
-        13.0,
-        Weight::Regular,
+        font(Weight::Regular, 13.0),
         p.secondary,
     );
 
