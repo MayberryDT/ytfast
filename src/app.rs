@@ -385,6 +385,7 @@ impl App {
         self.applied = Some(self.palette.clone());
         self.transition = fastframe_theme::Transition::new(fastframe_theme::Reveal::Band);
         self.hidden = false;
+        self.desktop.window_open.send_replace(true);
         self.wants_show = false;
         self.switch_window = false;
     }
@@ -933,8 +934,9 @@ impl App {
         }
     }
 
-    /// Backend events and outside requests: every frame, and every tick of
-    /// the background loop while no window is open.
+    /// Backend events and outside requests: from eframe's logic hook (before
+    /// every frame, and while the window gets none), and every tick of the
+    /// background loop while no window is open.
     fn background(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.backend.events.try_recv() {
             self.handle(event);
@@ -1195,7 +1197,6 @@ impl App {
     /// One frame of the open window.
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.background(&ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
         self.desktop.focused.store(focused, Ordering::Relaxed);
         self.dropped(&ctx);
@@ -1258,6 +1259,7 @@ impl fastframe_shell::Resident for App {
         self.end_audition();
         log::info!("window closed; playing on in the background");
         self.hidden = true;
+        self.desktop.window_open.send_replace(false);
         self.switch_window = false;
         self.wants_show = false;
         self.desktop.focused.store(false, Ordering::Relaxed);
@@ -1293,6 +1295,14 @@ impl fastframe_shell::Resident for App {
 pub struct Window(pub fastframe_shell::Held<App>);
 
 impl eframe::App for Window {
+    /// Before every frame, and on its own while the compositor withholds
+    /// frames from a window nobody sees (one on another workspace): backend
+    /// events and outside requests (`ytfast quit`, MPRIS Raise) can't wait
+    /// for the window to be looked at again.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.0.background(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.0.frame(ui);
     }

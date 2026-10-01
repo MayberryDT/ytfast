@@ -29,4 +29,5 @@ pub mod searches;
 pub mod settings;
 pub mod single_instance;
 pub mod theme;
+pub mod tray;
 pub mod ui;

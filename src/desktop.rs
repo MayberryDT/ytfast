@@ -52,12 +52,24 @@ pub enum Request {
 }
 
 /// Flags the interface sets and the backend's desktop tasks read.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Flags {
     /// A ytfast window has the keyboard focus.
     pub focused: AtomicBool,
     /// Settings: "Show a notification when the song changes".
     pub notifications: AtomicBool,
+    /// A window is open; the tray icon shows while none is.
+    pub window_open: watch::Sender<bool>,
+}
+
+impl Default for Flags {
+    fn default() -> Self {
+        Self {
+            focused: AtomicBool::new(false),
+            notifications: AtomicBool::new(false),
+            window_open: watch::Sender::new(true),
+        }
+    }
 }
 
 /// Drives the app from outside the window: MPRIS and the command line.

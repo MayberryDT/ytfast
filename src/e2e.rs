@@ -557,6 +557,63 @@ fn playerctl(args: &[&str]) -> Value {
     exec("playerctl", &all)
 }
 
+/// This app's tray item on the session bus (`org.kde.StatusNotifierItem-<pid>-<n>`).
+fn tray_item() -> Option<String> {
+    let prefix = format!("org.kde.StatusNotifierItem-{}-", std::process::id());
+    stdout(&exec(
+        "busctl",
+        &["--user", "list", "--no-legend", "--no-pager"],
+    ))
+    .split_whitespace()
+    .find(|word| word.starts_with(&prefix))
+    .map(str::to_owned)
+}
+
+/// The tray item's `Status`: "Active" (shown) or "Passive" (hidden).
+fn tray_status() -> String {
+    let Some(name) = tray_item() else {
+        return String::new();
+    };
+    let property = exec(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            &name,
+            "/StatusNotifierItem",
+            "org.kde.StatusNotifierItem",
+            "Status",
+        ],
+    );
+    stdout(&property)
+        .trim()
+        .trim_start_matches("s ")
+        .trim_matches('"')
+        .to_owned()
+}
+
+/// Clicks the tray item as the bar does: `Activate` (left) or
+/// `SecondaryActivate` (middle).
+fn tray_click(method: &str) -> Value {
+    match tray_item() {
+        Some(name) => exec(
+            "busctl",
+            &[
+                "--user",
+                "call",
+                &name,
+                "/StatusNotifierItem",
+                "org.kde.StatusNotifierItem",
+                method,
+                "ii",
+                "0",
+                "0",
+            ],
+        ),
+        None => json!("no tray item"),
+    }
+}
+
 fn stdout(value: &Value) -> String {
     value["stdout"].as_str().unwrap_or_default().to_owned()
 }
@@ -665,14 +722,31 @@ fn desktop() -> Vec<Step> {
         }),
         Step::Key(egui::Key::Escape),
         Step::Sleep(1.0),
-        // Closing the window plays on.
+        // Closing the window plays on, with an icon in the tray.
+        wait(
+            "tray item registered, hidden",
+            15.0,
+            every_second(|_| tray_status() == "Passive"),
+        ),
         Step::Window("close the window", egui::ViewportCommand::Close),
         wait("window closed, still playing", 15.0, |a| {
             a.hidden && a.playback.playing
         }),
+        wait(
+            "tray icon shown",
+            10.0,
+            every_second(|_| tray_status() == "Active"),
+        ),
         Step::Sleep(3.0),
         measure("playing_while_closed", playing_track),
         measure("status_while_closed", |_| playerctl(&["status"])),
+        // Middle-click on the tray icon pauses, and again plays.
+        measure("tray_middle_click", |_| tray_click("SecondaryActivate")),
+        wait("tray paused it", 10.0, |a| !a.playback.playing),
+        measure("tray_middle_click_again", |_| {
+            tray_click("SecondaryActivate")
+        }),
+        wait("tray played it", 30.0, |a| a.playback.playing),
         // A song change with no window focused: a notification.
         run("mark the song", |a| {
             set_mark(playing_id(a).unwrap_or_default())
@@ -692,6 +766,27 @@ fn desktop() -> Vec<Step> {
         wait("window back", 20.0, |a| !a.hidden),
         Step::Sleep(3.0),
         Step::Screenshot("d1-shown-again"),
+        wait(
+            "tray icon hidden with the window open",
+            10.0,
+            every_second(|_| tray_status() == "Passive"),
+        ),
+        // A click on the tray icon brings the window back too.
+        Step::Window("close the window again", egui::ViewportCommand::Close),
+        wait("window closed again", 15.0, |a| a.hidden),
+        wait(
+            "tray icon shown again",
+            10.0,
+            every_second(|_| tray_status() == "Active"),
+        ),
+        measure("tray_click", |_| tray_click("Activate")),
+        wait("tray click brought the window back", 20.0, |a| !a.hidden),
+        wait(
+            "tray icon hidden again",
+            10.0,
+            every_second(|_| tray_status() == "Passive"),
+        ),
+        Step::Sleep(2.0),
         run("mark the song", |a| {
             set_mark(playing_id(a).unwrap_or_default())
         }),

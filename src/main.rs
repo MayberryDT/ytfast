@@ -95,6 +95,12 @@ fn main() -> anyhow::Result<()> {
         let remote = remote.clone();
         single_instance::listen(&paths.runtime, move |message| remote.deliver(message))?;
     }
+    ytfast::tray::start(
+        &backend.runtime,
+        remote.clone(),
+        backend.now.clone(),
+        flags.window_open.subscribe(),
+    );
     ytfast::mpris::start(
         &backend.runtime,
         remote,
