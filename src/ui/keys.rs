@@ -385,6 +385,7 @@ pub(super) fn handle(app: &App, ctx: &Context, actions: &mut Vec<Action>) {
             if (typing && !matches!(does, Do::Close | Do::PlayAnything))
                 || (repeat && !does.repeats())
                 || (mini && !matters_in_mini(does))
+                || (app.stage.open && !matters_in_stage(does))
             {
                 return true;
             }
@@ -467,6 +468,28 @@ fn matters_in_mini(does: Do) -> bool {
             | Do::Repeat
             | Do::Like
             | Do::Mini
+            | Do::Quit
+    )
+}
+
+/// Stage draws nothing but itself, so it answers only what shows there:
+/// playback, like, the most replayed part, Stage itself, Esc and quitting.
+fn matters_in_stage(does: Do) -> bool {
+    matches!(
+        does,
+        Do::TogglePause
+            | Do::Seek(_)
+            | Do::Previous
+            | Do::Next
+            | Do::Volume(_)
+            | Do::Mute
+            | Do::Shuffle
+            | Do::Repeat
+            | Do::Like
+            | Do::Peak
+            | Do::Stage
+            | Do::StageFullscreen
+            | Do::Close
             | Do::Quit
     )
 }
