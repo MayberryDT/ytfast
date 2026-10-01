@@ -1721,11 +1721,14 @@ fn journey() -> Vec<Step> {
         }),
         Step::Sleep(3.0),
         Step::Screenshot("12-artist"),
-        // An album from Home's new releases.
-        click("Home"),
-        wait("home again", 30.0, |a| a.view == View::Home),
-        click_first_visible("an album on Home", |a| {
-            item_titles(a, &View::Home.target(), |i| {
+        // An album from Explore's new releases (Home is personal and its
+        // albums are often off screen inside a carousel).
+        click("Explore"),
+        wait("explore again", 60.0, |a| {
+            a.view == View::Explore && loaded(a, &View::Explore.target(), 2)
+        }),
+        click_first_visible("an album on Explore", |a| {
+            item_titles(a, &View::Explore.target(), |i| {
                 i.kind == crate::model::ItemKind::Album
             })
         }),
