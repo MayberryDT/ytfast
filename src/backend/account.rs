@@ -60,6 +60,8 @@ async fn writer(
     mut writes: mpsc::UnboundedReceiver<Write>,
 ) {
     while let Some(Write { op, edit, refresh }) = writes.recv().await {
+        let started = Instant::now();
+        let what = format!("{edit:?}");
         let result = match run(&client, edit).await {
             Ok(done) => Ok(done),
             Err(Answer::Api(ApiError::Auth)) => {
@@ -73,6 +75,14 @@ async fn writer(
             }
             Err(Answer::Refused(message)) => Err(Failure::Refused(message)),
         };
+        log::info!(
+            "account write {op} {what}: {} after {:.2}s",
+            match &result {
+                Ok(_) => "accepted".to_owned(),
+                Err(failure) => format!("{failure:?}"),
+            },
+            started.elapsed().as_secs_f64()
+        );
         let ok = result.is_ok();
         sink.send(Event::AccountEdited { op, result });
         // The refetch waits for YouTube Music to list the change; the next

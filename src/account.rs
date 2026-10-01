@@ -22,8 +22,10 @@ use crate::model::{
     Target, Track,
 };
 
-/// How long the app's own mark outlives what fetched pages say.
-const TRUST_LOCAL: Duration = Duration::from_secs(15);
+/// How long a change YouTube Music accepted outlives reads that don't show
+/// it yet. Its reads lag its writes by 0–25 s (likes, 2026-10-01), and a read
+/// that shows the change ends the wait.
+const TRUST_LOCAL: Duration = Duration::from_secs(90);
 
 /// A write the backend makes to the account.
 #[derive(Clone, Debug)]
@@ -249,8 +251,9 @@ pub struct AccountState {
     pub fetched_likes: HashMap<String, LikeStatus>,
     /// The last playlist created here: (title, id).
     pub created: Option<(String, String)>,
-    /// When a change to each id was last accepted.
-    accepted: HashMap<String, Instant>,
+    /// The last accepted change to each id's rating, library state or
+    /// subscription, until YouTube Music's reads show it.
+    accepted: HashMap<String, (Instant, Mark)>,
     pending: HashMap<u64, Pending>,
     /// Changes to cached pages, applied again to every copy of an affected
     /// page that arrives while they are in flight or recent.
@@ -270,14 +273,14 @@ impl AccountState {
         !self.pending.is_empty()
     }
 
-    /// Whether a fetched page speaks for `id`: no change to it is on its
-    /// way, and YouTube Music has had time to list the last one.
-    fn page_wins(&self, id: &str) -> bool {
+    /// Whether a read of `id` as `mark` may replace what the app shows: no
+    /// change to `id` is on its way, and the last accepted one is either
+    /// what the read says or long enough ago.
+    fn read_wins(&self, id: &str, mark: Mark) -> bool {
         !self.pending.values().any(|p| p.subject == id)
-            && self
-                .accepted
-                .get(id)
-                .is_none_or(|t| t.elapsed() > TRUST_LOCAL)
+            && self.accepted.get(id).is_none_or(|(t, set)| {
+                !same_kind(*set, mark) || *set == mark || t.elapsed() > TRUST_LOCAL
+            })
     }
 
     /// Forgets page changes that YouTube Music has had time to list.
@@ -310,10 +313,19 @@ impl AccountState {
 
     /// YouTube Music says `id` is `mark` (a fresh page or watch-next).
     fn heard(&mut self, id: &str, mark: Mark) {
-        if self.page_wins(id) {
-            self.confirmed.set(id, mark);
-            Arc::make_mut(&mut self.marks).set(id, mark);
+        if !self.read_wins(id, mark) {
+            return;
         }
+        if self
+            .accepted
+            .get(id)
+            .is_some_and(|(_, set)| same_kind(*set, mark))
+        {
+            // Its reads have caught up (or the wait is over): they speak again.
+            self.accepted.remove(id);
+        }
+        self.confirmed.set(id, mark);
+        Arc::make_mut(&mut self.marks).set(id, mark);
     }
 }
 
@@ -1203,10 +1215,10 @@ impl App {
         match result {
             Ok(done) => {
                 let state = &mut self.account_state;
-                state
-                    .accepted
-                    .insert(pending.subject.clone(), Instant::now());
                 if let Some(mark) = pending.mark {
+                    state
+                        .accepted
+                        .insert(pending.subject.clone(), (Instant::now(), mark));
                     state.confirmed.set(&pending.subject, mark);
                     state.settle(&pending.subject, mark);
                 }

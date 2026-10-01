@@ -1217,8 +1217,20 @@ fn dialog_open(app: &App, kind: &str) -> bool {
     )
 }
 
+fn liked_music() -> Target {
+    Target::browse("VLLM")
+}
+
+/// Whether Liked Music, as last fetched, lists the song.
+fn in_liked_music(app: &App) -> Option<bool> {
+    let id = fact("liked")?;
+    let page = app.page_state(&liked_music())?.page.as_ref()?;
+    Some(song_ids(page).contains(&id))
+}
+
 /// What the run may change, read from YouTube Music: saved albums,
-/// subscriptions, playlists, and the rating of the song it likes.
+/// subscriptions, playlists, and the rating of the song it likes (its
+/// watch-next and Liked Music).
 fn account_snapshot(app: &App) -> Value {
     let sorted = |target: Target| {
         let mut ids = app
@@ -1235,6 +1247,7 @@ fn account_snapshot(app: &App) -> Value {
         "playlists": sorted(LibraryTab::Playlists.target()),
         "song": fact("liked"),
         "song_rating": rated(app, "liked").map(|r| format!("{r:?}")),
+        "song_in_liked_music": in_liked_music(app),
     })
 }
 
@@ -1243,6 +1256,7 @@ fn refresh_account(app: &mut App) {
     app.ensure_page(LibraryTab::Albums.target(), true);
     app.ensure_page(subscriptions(), true);
     app.ensure_page(LibraryTab::Playlists.target(), true);
+    app.ensure_page(liked_music(), true);
     ask_rating(app, "liked");
 }
 
@@ -1250,11 +1264,108 @@ fn account_refetched(app: &App) -> bool {
     refetched(app, &LibraryTab::Albums.target()).is_some()
         && refetched(app, &subscriptions()).is_some()
         && refetched(app, &LibraryTab::Playlists.target()).is_some()
+        && refetched(app, &liked_music()).is_some()
         && rated(app, "liked").is_some()
+}
+
+/// The account as fetched now is as the run found it.
+fn account_as_found(app: &App) -> bool {
+    account_refetched(app) && fact("before") == Some(account_snapshot(app).to_string())
 }
 
 fn idle(app: &App) -> bool {
     !app.account_state.busy()
+}
+
+/// The app said YouTube Music refused an account change.
+fn refused(app: &App) -> bool {
+    app.errors.iter().any(|e| {
+        e.contains("didn't accept it")
+            || e.contains("Check the connection and try again")
+            || e.contains("signed you out")
+    })
+}
+
+/// Puts back what the run changed and the account still shows, read from
+/// the last fetch, by writing to YouTube Music directly: the song's rating,
+/// the album, the subscription, and playlists this run made. Only what
+/// differs from the start is touched.
+fn put_back(app: &mut App) {
+    use crate::account::Edit;
+    let Some(before) = fact("before").and_then(|b| serde_json::from_str::<Value>(&b).ok()) else {
+        return;
+    };
+    let had = |key: &str, id: &str| {
+        before[key]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id)))
+    };
+    let has = |target: Target, id: &str| {
+        app.page_state(&target)
+            .and_then(|s| s.page.as_ref())
+            .is_some_and(|p| browse_ids(p).iter().any(|b| b == id))
+    };
+    let mut edits: Vec<Edit> = Vec::new();
+    if let Some(song) = fact("liked")
+        && before["song_rating"].as_str() == Some("Indifferent")
+        && (rated(app, "liked") != Some(crate::model::LikeStatus::Indifferent)
+            || in_liked_music(app) == Some(true))
+    {
+        edits.push(Edit::Rate {
+            video_id: song,
+            status: crate::model::LikeStatus::Indifferent,
+        });
+    }
+    if !had("albums", E2E_ALBUM)
+        && has(LibraryTab::Albums.target(), E2E_ALBUM)
+        && let Some(library) =
+            header_of(app, &Target::browse(E2E_ALBUM)).and_then(|h| h.library.clone())
+    {
+        edits.push(Edit::Save {
+            playlist_id: library.playlist_id,
+            save: false,
+        });
+    }
+    if !had("subscriptions", E2E_ARTIST)
+        && has(subscriptions(), E2E_ARTIST)
+        && let Some(subscription) =
+            header_of(app, &Target::browse(E2E_ARTIST)).and_then(|h| h.subscription.clone())
+    {
+        edits.push(Edit::Subscribe {
+            channel_id: subscription.channel_id,
+            subscribe: false,
+        });
+    }
+    let made = fact("playlist");
+    let ours: Vec<String> = app
+        .page_state(&LibraryTab::Playlists.target())
+        .and_then(|s| s.page.as_ref())
+        .map(|p| {
+            p.shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter_map(|i| {
+                    let id = i.editable.clone()?;
+                    let named = i.title == E2E_PLAYLIST || i.title == E2E_RENAMED;
+                    let new = !had("playlists", &format!("VL{id}"));
+                    (new && (named || made.as_deref() == Some(id.as_str()))).then_some(id)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    edits.extend(
+        ours.into_iter()
+            .map(|playlist_id| Edit::Delete { playlist_id }),
+    );
+    set_fact("put_back", format!("{edits:?}"));
+    for (n, edit) in edits.into_iter().enumerate() {
+        // Not the app's own operations: their answers are only logged.
+        app.backend.send(Command::AccountEdit {
+            op: u64::MAX - n as u64,
+            edit,
+            refresh: Vec::new(),
+        });
+    }
 }
 
 /// Likes and unlikes a song (player bar, then a row), saves and removes an
@@ -1315,6 +1426,7 @@ fn account() -> Vec<Step> {
         }),
         wait("song not rated", 1.0, |a| {
             rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent)
+                && in_liked_music(a) == Some(false)
         }),
         wait("album not in the library", 1.0, |a| {
             refetched(a, &LibraryTab::Albums.target())
@@ -1370,10 +1482,12 @@ fn account() -> Vec<Step> {
             shown_like(a, "liked") == Some(crate::model::LikeStatus::Like)
         }),
         Step::Screenshot("account-02-liked"),
-        wait("like accepted", 30.0, idle),
+        wait("like accepted", 30.0, |a| idle(a) && !refused(a)),
+        // YouTube Music's reads lag its writes by up to ~25 s.
+        run("forget the old rating", |a| ask_rating(a, "liked")),
         poll(
             "like confirmed by a fresh watch-next",
-            30.0,
+            90.0,
             |a| ask_rating(a, "liked"),
             |a| rated(a, "liked") == Some(crate::model::LikeStatus::Like),
         ),
@@ -1381,17 +1495,18 @@ fn account() -> Vec<Step> {
         Step::Sleep(1.5),
         Step::Screenshot("account-03-now-playing-liked"),
         click("Close player"),
-        // Once YouTube Music's own pages speak for the song again, the
-        // player bar still shows the like: Liked Music lists it, and the
-        // queue's copy of the song carries no rating of its own.
-        Step::Sleep(16.0),
-        run("fetch Liked Music", |a| {
-            set_confirmed();
-            a.ensure_page(Target::browse("VLLM"), true);
-        }),
-        wait("Liked Music fetched", 60.0, |a| {
-            refetched(a, &Target::browse("VLLM")).is_some()
-        }),
+        // Once Liked Music lists the song, it speaks for the song, and the
+        // player bar (whose copy of the song carries no rating) still shows
+        // the like.
+        poll(
+            "Liked Music lists the song",
+            90.0,
+            |a| {
+                set_confirmed();
+                a.ensure_page(liked_music(), true);
+            },
+            |a| refetched(a, &liked_music()).is_some() && in_liked_music(a) == Some(true),
+        ),
         wait("player bar still shows the like", 1.0, |a| {
             a.playback
                 .index
@@ -1409,10 +1524,11 @@ fn account() -> Vec<Step> {
         wait("unliked at once", 0.5, |a| {
             shown_like(a, "liked") == Some(crate::model::LikeStatus::Indifferent)
         }),
-        wait("unlike accepted", 30.0, idle),
+        wait("unlike accepted", 30.0, |a| idle(a) && !refused(a)),
+        run("forget the rating again", |a| ask_rating(a, "liked")),
         poll(
             "unlike confirmed by a fresh watch-next",
-            30.0,
+            90.0,
             |a| ask_rating(a, "liked"),
             |a| rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent),
         ),
@@ -1429,7 +1545,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "album listed in Library → Albums",
-            40.0,
+            90.0,
             |a| a.ensure_page(LibraryTab::Albums.target(), true),
             |a| {
                 refetched(a, &LibraryTab::Albums.target())
@@ -1450,7 +1566,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "album gone from Library → Albums",
-            40.0,
+            90.0,
             |a| a.ensure_page(LibraryTab::Albums.target(), true),
             |a| {
                 refetched(a, &LibraryTab::Albums.target())
@@ -1470,7 +1586,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "subscription confirmed",
-            40.0,
+            90.0,
             |a| {
                 a.ensure_page(Target::browse(E2E_ARTIST), true);
                 a.ensure_page(subscriptions(), true);
@@ -1488,7 +1604,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "unsubscribed",
-            40.0,
+            90.0,
             |a| {
                 a.ensure_page(Target::browse(E2E_ARTIST), true);
                 a.ensure_page(subscriptions(), true);
@@ -1531,7 +1647,7 @@ fn account() -> Vec<Step> {
         Step::Screenshot("account-11-created"),
         poll(
             "playlist listed in Library",
-            40.0,
+            90.0,
             |a| a.ensure_page(LibraryTab::Playlists.target(), true),
             |a| {
                 let id = fact("playlist");
@@ -1584,7 +1700,7 @@ fn account() -> Vec<Step> {
             }
             set_confirmed();
         }),
-        poll("three songs listed", 40.0, refresh_playlist, |a| {
+        poll("three songs listed", 90.0, refresh_playlist, |a| {
             listed_rows(a) == facts(&["first", "liked", "third"])
         }),
         Step::Sleep(2.0),
@@ -1601,7 +1717,7 @@ fn account() -> Vec<Step> {
         Step::Screenshot("account-14-moved"),
         wait("move accepted", 30.0, idle),
         run("mark", |_| set_confirmed()),
-        poll("new order listed", 40.0, refresh_playlist, |a| {
+        poll("new order listed", 90.0, refresh_playlist, |a| {
             listed_rows(a) == facts(&["third", "first", "liked"])
         }),
         // Remove one.
@@ -1617,7 +1733,7 @@ fn account() -> Vec<Step> {
         }),
         wait("removal from the playlist accepted", 30.0, idle),
         run("mark", |_| set_confirmed()),
-        poll("removal listed", 40.0, refresh_playlist, |a| {
+        poll("removal listed", 90.0, refresh_playlist, |a| {
             listed_rows(a) == facts(&["third", "liked"])
         }),
         // Rename and describe.
@@ -1638,7 +1754,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "new name and description listed",
-            40.0,
+            90.0,
             refresh_playlist,
             |a| {
                 created_playlist()
@@ -1662,7 +1778,7 @@ fn account() -> Vec<Step> {
         run("mark", |_| set_confirmed()),
         poll(
             "playlist gone from Library",
-            40.0,
+            90.0,
             |a| a.ensure_page(LibraryTab::Playlists.target(), true),
             |a| {
                 let id = fact("playlist");
@@ -1675,13 +1791,18 @@ fn account() -> Vec<Step> {
             },
         ),
         Step::Screenshot("account-18-deleted"),
-        // After: the account as it was.
-        run("fetch the account again", refresh_account),
-        wait("account fetched again", 60.0, account_refetched),
+        // After: the account as it was. Its reads may lag; then whatever
+        // still differs is put back, whatever happened above.
+        poll("account as found", 90.0, refresh_account, account_as_found),
         measure("account_after", account_snapshot),
-        wait("account as found", 1.0, |a| {
-            fact("before") == Some(account_snapshot(a).to_string())
-        }),
+        run("put back what differs", put_back),
+        measure("put_back", |_| json!(fact("put_back"))),
+        poll(
+            "account as found after putting back",
+            120.0,
+            refresh_account,
+            account_as_found,
+        ),
     ]
 }
 
