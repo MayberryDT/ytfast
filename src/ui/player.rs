@@ -36,32 +36,66 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     {
         actions.push(Action::Command(Command::Seek(f64::from(f) * duration)));
     }
-    let thickness = if active { 4.0 } else { 2.0 };
+    // The bar thickens and the handle grows with weight, not in a snap.
+    let hover = motion::spring(
+        ui.ctx(),
+        Id::new("seek-hover"),
+        if active { 1.0 } else { 0.0 },
+        380.0,
+    );
+    let thickness = 2.0 + 2.0 * hover;
     let track_rect = Rect::from_min_size(full.min, vec2(full.width(), thickness));
     ui.painter().rect_filled(track_rect, 0.0, p.surface_active);
-    let fraction = if duration > 0.0 {
+    let target = if duration > 0.0 {
         (shown / duration).clamp(0.0, 1.0) as f32
     } else {
         0.0
     };
+    // Playback creeps forward exactly; a seek (a jump) travels there.
+    let drawn_key = Id::new("seek-drawn");
+    let drawn: f32 = ui.data(|d| d.get_temp(drawn_key)).unwrap_or(target);
+    let fraction = if response.dragged() || (target - drawn).abs() * full.width() < 6.0 {
+        target
+    } else {
+        motion::drive(
+            ui.ctx(),
+            Id::new("seek-travel"),
+            drawn * full.width(),
+            target * full.width(),
+            300.0,
+        ) / full.width()
+    };
+    ui.data_mut(|d| d.insert_temp(drawn_key, fraction));
     ui.painter().rect_filled(
         Rect::from_min_size(full.min, vec2(full.width() * fraction, thickness)),
         0.0,
         p.accent,
     );
-    if active {
+    let knob = motion::spring(
+        ui.ctx(),
+        Id::new("seek-knob"),
+        if response.dragged() {
+            1.25
+        } else if active {
+            1.0
+        } else {
+            0.0
+        },
+        520.0,
+    );
+    if knob > 0.02 {
         ui.painter().circle_filled(
             pos2(
                 full.left() + full.width() * fraction,
                 full.top() + thickness / 2.0,
             ),
-            6.0,
+            6.0 * knob,
             p.accent,
         );
-        if let Some(pos) = response.hover_pos() {
-            let at = f64::from(((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0)) * duration;
-            response.clone().on_hover_text_at_pointer(format_time(at));
-        }
+    }
+    if active && let Some(pos) = response.hover_pos() {
+        let at = f64::from(((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0)) * duration;
+        response.clone().on_hover_text_at_pointer(format_time(at));
     }
 
     let inner = full.shrink2(vec2(16.0, 0.0)).with_min_y(full.top() + 4.0);
@@ -76,9 +110,26 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         actions.push(Action::Command(Command::Previous));
     }
     let (rect, play) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
-    if play.hovered() {
-        ui.painter()
-            .circle_filled(rect.center(), 24.0, p.surface_hover);
+    // The button gives under the press and swells a little under the pointer.
+    let press = motion::spring(
+        ui.ctx(),
+        play.id.with("press"),
+        if play.is_pointer_button_down_on() {
+            0.88
+        } else if play.hovered() {
+            1.06
+        } else {
+            1.0
+        },
+        600.0,
+    );
+    let hover_disc = motion::lift(ui, play.id, play.hovered());
+    if hover_disc > 0.01 {
+        ui.painter().circle_filled(
+            rect.center(),
+            24.0 * press,
+            p.surface_hover.gamma_multiply(hover_disc),
+        );
     }
     if pb.loading {
         egui::Spinner::new()
@@ -86,9 +137,14 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
             .color(p.text)
             .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(28.0)));
     } else {
-        let icon = if pb.playing { Icon::Pause } else { Icon::Play };
-        icon.image(p.text, 30.0)
-            .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(30.0)));
+        // Play and pause are one shape: the triangle's halves become the bars.
+        let m = motion::spring(
+            ui.ctx(),
+            play.id.with("morph"),
+            if pb.playing { 1.0 } else { 0.0 },
+            420.0,
+        );
+        play_pause_glyph(ui, rect.center(), 15.0 * press, m, p.text);
     }
     if named(play, if pb.playing { "Pause" } else { "Play" })
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -269,12 +325,59 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         } else {
             Icon::Volume
         };
-        if icon_button(ui, icon, 20.0, p.secondary, p, "Mute").clicked() {
+        let mute = icon_button(ui, icon, 20.0, p.secondary, p, "Mute");
+        if mute.clicked() {
             actions.push(Action::Command(Command::Volume(if pb.volume > 0.0 {
                 0.0
             } else {
                 70.0
             })));
         }
+        // The wheel over the volume controls turns the volume.
+        if ui.rect_contains_pointer(slider.rect.union(mute.rect)) {
+            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                let next = (pb.volume + f64::from(wheel) / 10.0).clamp(0.0, 100.0);
+                actions.push(Action::Command(Command::Volume(next)));
+            }
+        }
     });
+}
+
+/// Play (`m` = 0) morphing into pause (`m` = 1), drawn at `center` in a box
+/// of half-size `r`: the triangle's left and right halves become the bars.
+fn play_pause_glyph(ui: &Ui, center: egui::Pos2, r: f32, m: f32, color: egui::Color32) {
+    let at = |x: f32, y: f32| center + vec2(x * r, y * r);
+    let lerp = |a: egui::Pos2, b: egui::Pos2| a + (b - a) * m;
+    // The triangle, nudged right so it looks centred.
+    let (x0, x1, half) = (-0.62, 0.78, 0.72);
+    let xm = (x0 + x1) / 2.0;
+    let top = |x: f32| -half + (x - x0) / (x1 - x0) * half;
+    let play_left = [
+        at(x0, -half),
+        at(xm, top(xm)),
+        at(xm, -top(xm)),
+        at(x0, half),
+    ];
+    let play_right = [at(xm, top(xm)), at(x1, 0.0), at(x1, 0.0), at(xm, -top(xm))];
+    let (bar, gap, h) = (0.36, 0.2, 0.64);
+    let pause_left = [
+        at(-gap - bar, -h),
+        at(-gap, -h),
+        at(-gap, h),
+        at(-gap - bar, h),
+    ];
+    let pause_right = [at(gap, -h), at(gap + bar, -h), at(gap + bar, h), at(gap, h)];
+    for (from, to) in [(play_left, pause_left), (play_right, pause_right)] {
+        let points: Vec<egui::Pos2> = from
+            .iter()
+            .zip(to.iter())
+            .map(|(a, b)| lerp(*a, *b))
+            .collect();
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
 }

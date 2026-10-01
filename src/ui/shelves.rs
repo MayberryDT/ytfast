@@ -105,6 +105,7 @@ pub(super) fn shelf_view(
                     });
                 });
             remember_width(ui, scroll_id, out.inner_rect.width());
+            glide(ui, scroll_state, scroll_id, &out, CARD + GAP);
         }
         ShelfStyle::RowCarousel => {
             let out = ScrollArea::horizontal()
@@ -124,6 +125,7 @@ pub(super) fn shelf_view(
                     });
                 });
             remember_width(ui, scroll_id, out.inner_rect.width());
+            glide(ui, scroll_state, scroll_id, &out, 380.0 + 24.0);
         }
         ShelfStyle::List => {
             for item in &shelf.items {
@@ -154,14 +156,70 @@ pub(super) fn shelf_view(
     }
 }
 
-/// Scrolls a carousel by most of its visible width.
+/// The arrows: glide by most of the visible width.
 fn nudge(ui: &Ui, id: Id, scroll_id: Id, direction: f32) {
     let width: f32 = ui
         .data(|d| d.get_temp(scroll_id.with("width")))
         .unwrap_or(800.0);
-    if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), id) {
-        state.offset.x = (state.offset.x + direction * (width - CARD).max(CARD)).max(0.0);
-        state.store(ui.ctx(), id);
+    if let Some(state) = egui::scroll_area::State::load(ui.ctx(), id) {
+        // Chained presses add up: start from where the glide is heading.
+        let from: f32 = ui
+            .data(|d| d.get_temp(scroll_id.with("target")))
+            .unwrap_or(state.offset.x);
+        let target = from + direction * (width - CARD).max(CARD);
+        ui.data_mut(|d| d.insert_temp(scroll_id.with("target"), target));
+    }
+}
+
+/// Moves a carousel towards its glide target, and once the wheel or touchpad
+/// lets go, settles it on the nearest card edge, like a physical strip.
+fn glide(
+    ui: &Ui,
+    state_id: Id,
+    scroll_id: Id,
+    out: &egui::scroll_area::ScrollAreaOutput<()>,
+    step: f32,
+) {
+    let ctx = ui.ctx();
+    let Some(mut state) = egui::scroll_area::State::load(ctx, state_id) else {
+        return;
+    };
+    let max = (out.content_size.x - out.inner_rect.width()).max(0.0);
+    let now = ctx.input(|i| i.time);
+    let last_key = scroll_id.with("last-scroll");
+    let target_key = scroll_id.with("target");
+    let hovered = ui.rect_contains_pointer(out.inner_rect);
+    if hovered && ctx.input(|i| i.smooth_scroll_delta.x != 0.0) {
+        // The hand is on it: follow the hand, settle afterwards.
+        ctx.data_mut(|d| {
+            d.insert_temp(last_key, now);
+            d.remove::<f32>(target_key);
+        });
+        return;
+    }
+    let mut target: Option<f32> = ctx.data(|d| d.get_temp(target_key));
+    if target.is_none()
+        && let Some(last) = ctx.data(|d| d.get_temp::<f64>(last_key))
+        && now - last > 0.14
+    {
+        ctx.data_mut(|d| d.remove::<f64>(last_key));
+        target = Some(state.offset.x);
+    } else if target.is_none() {
+        if ctx.data(|d| d.get_temp::<f64>(last_key)).is_some() {
+            ctx.request_repaint();
+        }
+        return;
+    }
+    let Some(raw) = target else { return };
+    // Card edges, except that the very end may sit between two.
+    let snapped = ((raw / step).round() * step).clamp(0.0, max);
+    let x = super::motion::drive(ctx, scroll_id.with("glide"), state.offset.x, snapped, 220.0);
+    state.offset.x = x;
+    state.store(ctx, state_id);
+    if x == snapped {
+        ctx.data_mut(|d| d.remove::<f32>(target_key));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(target_key, raw));
     }
 }
 

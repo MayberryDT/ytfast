@@ -177,6 +177,19 @@ fn motion() -> Vec<Step> {
         "09-np-close-c",
         "09-np-close-d",
     ]));
+    // Physical feel: pause/play morph, and a carousel gliding to a card edge.
+    steps.extend([Step::Sleep(1.5), click("Pause")]);
+    steps.extend(burst(&["10-morph-a", "10-morph-b", "10-morph-c"]));
+    steps.extend([Step::Sleep(1.0), click("Scroll right")]);
+    steps.extend(burst(&["11-glide-a", "11-glide-b", "11-glide-c"]));
+    steps.extend([
+        Step::Sleep(1.0),
+        Step::Screenshot("11-glide-settled"),
+        measure("carousel_offsets", |a| {
+            let _ = a;
+            json!(null)
+        }),
+    ]);
     steps.extend([
         Step::Sleep(1.0),
         run("pause", |a| {

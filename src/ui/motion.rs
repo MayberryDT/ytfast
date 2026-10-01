@@ -71,6 +71,29 @@ pub fn lift(ui: &Ui, id: Id, on: bool) -> f32 {
     spring(ui.ctx(), id.with("lift"), if on { 1.0 } else { 0.0 }, 320.0)
 }
 
+/// Moves an externally held value (a scroll offset, a drawn position) from
+/// `current` towards `target` with spring physics; only the velocity is kept
+/// here, so whoever owns the value can also change it directly.
+pub fn drive(ctx: &Context, id: Id, current: f32, target: f32, stiffness: f32) -> f32 {
+    let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 1.0 / 20.0);
+    let mut velocity = ctx.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let damping = 2.0 * 0.9 * stiffness.sqrt();
+    let mut value = current;
+    let steps = 4;
+    let h = dt / steps as f32;
+    for _ in 0..steps {
+        velocity += (stiffness * (target - value) - damping * velocity) * h;
+        value += velocity * h;
+    }
+    if (value - target).abs() < 0.5 && velocity.abs() < 5.0 {
+        ctx.data_mut(|d| d.remove::<f32>(id));
+        return target;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, velocity));
+    ctx.request_repaint();
+    value
+}
+
 #[derive(Clone)]
 struct Flight {
     url: String,
