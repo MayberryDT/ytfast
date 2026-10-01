@@ -3245,7 +3245,11 @@ fn control() -> Vec<Step> {
         run("back to the album", move |a| {
             a.open(View::Page(album2.clone()))
         }),
-        Step::Key(Key::Space),
+        run("pause if playing", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
         wait("paused", 5.0, |a| !a.playback.playing),
     ]
 }

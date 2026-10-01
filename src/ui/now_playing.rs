@@ -303,7 +303,8 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                     place: super::menu::Place::UpNext(i),
                 };
                 super::menu::on_secondary(ui, &response, || Some(subject()), actions);
-                if tools {
+                // Kept while pressed (unlike `tools`), so its click registers.
+                if pointer_here {
                     let button = Rect::from_center_size(
                         pos2(rect.right() - 60.0, rect.center().y),
                         Vec2::splat(30.0),

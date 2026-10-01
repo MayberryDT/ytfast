@@ -58,7 +58,10 @@ pub(super) enum Subject {
 #[derive(Clone)]
 struct Menu {
     subject: Subject,
+    /// Where it was opened from (it grows out of this point).
     at: Pos2,
+    /// Its top left, fixed on its first frame.
+    origin: Option<Pos2>,
     /// The item the keyboard is on.
     selected: Option<usize>,
     /// Entries last frame, for the arrows to wrap.
@@ -111,6 +114,7 @@ pub(super) fn open(ctx: &Context, subject: Subject, at: Pos2, actions: &mut Vec<
         Some(Menu {
             subject,
             at,
+            origin: None,
             selected: None,
             count: 0,
             chosen: false,
@@ -381,8 +385,8 @@ fn page_link(page: Option<&Target>, play: Option<&Target>) -> Option<String> {
     }
 }
 
-/// The menu's entries now: those that depend on the account or on a page
-/// still loading appear once they are known.
+/// The menu's entries now. Those that wait on a page (Save to library,
+/// Subscribe) come last once it is known, so nothing moves under the pointer.
 fn entries(app: &App, subject: &Subject) -> Vec<Entry> {
     let signed_in = matches!(app.account, Account::SignedIn { .. });
     let marks = &app.account_state.marks;
@@ -478,6 +482,12 @@ fn entries(app: &App, subject: &Subject) -> Vec<Entry> {
                     }
                 }
             }
+            if let Some(artist) = artists.iter().find_map(|r| r.target.clone()) {
+                out.push(entry(Icon::User, "Go to artist", Does::Open(artist)));
+            }
+            if let Some(link) = page_link(page.as_ref(), play.as_ref()) {
+                out.push(entry(Icon::Link, "Copy link", Does::Copy(link)));
+            }
             if let (true, Some(h)) = (signed_in, header)
                 && let Some(library) = &h.library
             {
@@ -496,12 +506,6 @@ fn entries(app: &App, subject: &Subject) -> Vec<Entry> {
                     },
                 ));
             }
-            if let Some(artist) = artists.iter().find_map(|r| r.target.clone()) {
-                out.push(entry(Icon::User, "Go to artist", Does::Open(artist)));
-            }
-            if let Some(link) = page_link(page.as_ref(), play.as_ref()) {
-                out.push(entry(Icon::Link, "Copy link", Does::Copy(link)));
-            }
         }
         Subject::Artist { page } => {
             out.push(entry(
@@ -512,6 +516,9 @@ fn entries(app: &App, subject: &Subject) -> Vec<Entry> {
             let header = app
                 .page_state(page)
                 .and_then(|s| s.page.as_ref()?.header.as_ref());
+            if let Some(link) = page_link(Some(page), None) {
+                out.push(entry(Icon::Link, "Copy link", Does::Copy(link)));
+            }
             if signed_in
                 && let Some((sub, name)) =
                     header.and_then(|h| Some((h.subscription.as_ref()?, h.title.clone())))
@@ -534,9 +541,6 @@ fn entries(app: &App, subject: &Subject) -> Vec<Entry> {
                         subscribe: !subscribed,
                     },
                 ));
-            }
-            if let Some(link) = page_link(Some(page), None) {
-                out.push(entry(Icon::Link, "Copy link", Does::Copy(link)));
             }
         }
     }
@@ -678,18 +682,23 @@ pub(super) fn show(app: &App, ctx: &Context, p: &Palette, actions: &mut Vec<Acti
     let layer = LayerId::new(Order::Foreground, id);
     let screen = ctx.content_rect();
     let height = entries.len() as f32 * ROW + 12.0;
-    // Opens below and right of the pointer, or wherever it fits.
-    let x = if menu.at.x + WIDTH > screen.right() - 8.0 {
-        menu.at.x - WIDTH
-    } else {
-        menu.at.x
-    };
-    let y = if menu.at.y + height > screen.bottom() - 8.0 {
-        (menu.at.y - height).max(screen.top() + 8.0)
-    } else {
-        menu.at.y
-    };
-    let rect = Rect::from_min_size(pos2(x, y), vec2(WIDTH, height));
+    // Opens below and right of the pointer, or wherever it fits, with room
+    // for an entry still to come; it stays put once open.
+    let origin = *menu.origin.get_or_insert_with(|| {
+        let room = height + ROW;
+        let x = if menu.at.x + WIDTH > screen.right() - 8.0 {
+            menu.at.x - WIDTH
+        } else {
+            menu.at.x
+        };
+        let y = if menu.at.y + room > screen.bottom() - 8.0 {
+            (menu.at.y - room).max(screen.top() + 8.0)
+        } else {
+            menu.at.y
+        };
+        pos2(x, y)
+    });
+    let rect = Rect::from_min_size(origin, vec2(WIDTH, height));
     // It grows out of the point it was opened from.
     let pivot = menu.at.to_vec2();
     let scale = 0.88 + 0.12 * t;
@@ -707,6 +716,8 @@ pub(super) fn show(app: &App, ctx: &Context, p: &Palette, actions: &mut Vec<Acti
         .fade_in(false)
         .show(ctx, |ui| {
             ui.multiply_opacity(t.min(1.0));
+            // The whole menu takes the pointer, its border too.
+            ui.allocate_rect(rect, Sense::click());
             ui.painter().add(
                 egui::epaint::Shadow {
                     offset: [0, 8],

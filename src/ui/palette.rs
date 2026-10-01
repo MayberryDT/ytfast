@@ -138,7 +138,11 @@ pub(super) fn palette(app: &mut App, ctx: &Context, p: &Palette, actions: &mut V
                         .inner;
                     #[cfg(feature = "e2e")]
                     crate::e2e::register(ui.ctx(), "Play anything", response.interact_rect);
-                    response.request_focus();
+                    // Asked for only when lost: asking again every frame
+                    // would reset the field's key filter and cancel IME input.
+                    if !response.has_focus() {
+                        response.request_focus();
+                    }
                     if response.changed() {
                         pa.edited();
                     }

@@ -249,7 +249,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         mid.add_space(12.0);
         let text_area = Rect::from_min_max(
             pos2(mid.cursor().left(), middle.top()),
-            pos2(middle.right() - 24.0, middle.bottom()),
+            pos2(middle.right() - 24.0 - controls, middle.bottom()),
         );
         if let (Some(old), Some((_, k))) = (previous, &handoff) {
             let mut leaving = mid.new_child(

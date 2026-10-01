@@ -84,4 +84,5 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     menu::show(app, ui.ctx(), &p, actions);
     palette::palette(app, ui.ctx(), &p, actions);
     keys::overlay(app, ui.ctx(), &p, actions);
+    keys::end_frame(ui.ctx());
 }

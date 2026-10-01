@@ -313,6 +313,18 @@ pub(super) fn settings_asked(ctx: &Context) -> bool {
         .unwrap_or(false)
 }
 
+fn typing_id() -> Id {
+    Id::new("ytfast-typing")
+}
+
+/// Call once the frame is drawn: whether a text field has the keyboard.
+/// egui lets go of a field on Esc before [`handle`] sees the key, so the
+/// shortcuts go by how the last frame ended.
+pub(super) fn end_frame(ctx: &Context) {
+    let typing = ctx.text_edit_focused();
+    ctx.data_mut(|d| d.insert_temp(typing_id(), typing));
+}
+
 /// What Esc closes now, if anything: the topmost of Play anything, the
 /// shortcuts and Now Playing. Dialogs, the equalizer and popups close
 /// themselves, and a text field just lets go.
@@ -341,7 +353,7 @@ pub(super) fn handle(app: &App, ctx: &Context, actions: &mut Vec<Action>) {
         super::menu::keys(ctx);
         return;
     }
-    let typing = ctx.text_edit_focused();
+    let typing = ctx.text_edit_focused() || ctx.data(|d| d.get_temp(typing_id()).unwrap_or(false));
     let mini = app.window == WindowKind::Mini;
     // Worked out before the input lock: it asks the context too.
     let mut closing = close(app, ctx, typing);
