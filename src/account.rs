@@ -669,7 +669,7 @@ impl PageEdit {
 }
 
 impl App {
-    fn signed_in(&self) -> bool {
+    pub(crate) fn signed_in(&self) -> bool {
         matches!(self.account, Account::SignedIn { .. })
     }
 

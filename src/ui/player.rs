@@ -106,6 +106,15 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         let at = f64::from(((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0)) * duration;
         response.clone().on_hover_text_at_pointer(format_time(at));
     }
+    // Anywhere on the bar that isn't a control opens or closes Now Playing.
+    // Registered before the controls, so each of them keeps its own clicks.
+    let backdrop = full.with_min_y(bar.bottom());
+    if ui
+        .interact(backdrop, Id::new("player-backdrop"), Sense::click())
+        .clicked()
+    {
+        actions.push(Action::NowPlaying(!app.now_playing));
+    }
 
     let inner = full.shrink2(vec2(16.0, 0.0)).with_min_y(full.top() + 4.0);
     let mut ui = ui.new_child(
@@ -167,14 +176,16 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
     }
     ui.add_space(8.0);
     // A fixed slot, so the song beside it doesn't shift as the digits change.
-    let (time, _) = ui.allocate_exact_size(vec2(104.0, 20.0), Sense::hover());
+    let (time, readout) = ui.allocate_exact_size(vec2(104.0, 20.0), Sense::hover());
+    let elapsed = format!("{} / {}", format_time(shown), format_time(duration));
     ui.painter().text(
         time.left_center(),
         egui::Align2::LEFT_CENTER,
-        format!("{} / {}", format_time(shown), format_time(duration)),
+        &elapsed,
         font(Weight::Regular, 13.0),
         p.secondary,
     );
+    named_as(readout, egui::WidgetType::Label, "Elapsed time");
 
     // Right side first, so the middle gets what is left.
     let right_width = 340.0 + if pb.sleep.is_some() { 132.0 } else { 44.0 };

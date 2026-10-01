@@ -758,7 +758,18 @@ impl App {
                 self.backend.send(Command::Notifications(on));
             }
             Action::ToggleLikeCurrent => self.toggle_like_current(),
-            Action::Account(action) => self.account_action(action),
+            Action::Account(action) => {
+                // Disliking the playing song moves on, as YouTube Music does.
+                let skip = self.signed_in()
+                    && matches!(&action, crate::account::AccountAction::Rate {
+                        track,
+                        status: crate::model::LikeStatus::Dislike,
+                    } if self.current_track().is_some_and(|t| t.video_id == track.video_id));
+                self.account_action(action);
+                if skip {
+                    self.backend.send(Command::Next);
+                }
+            }
             Action::ShowEqualizer(open) => self.equalizer_open = open,
             Action::Control(action) => self.control_action(ctx, action),
             Action::Stage(open) => self.set_stage(ctx, open),

@@ -1532,6 +1532,43 @@ fn account() -> Vec<Step> {
             |a| ask_rating(a, "liked"),
             |a| rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent),
         ),
+        // Disliking the playing song moves on to the next one.
+        click("Dislike"),
+        wait("disliked at once", 0.5, |a| {
+            shown_like(a, "liked") == Some(crate::model::LikeStatus::Dislike)
+        }),
+        wait("Dislike moved on to the next song", 30.0, |a| {
+            !a.playback.loading && current_id(a) != json!(fact("liked"))
+        }),
+        run("pause the next song", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        Step::Screenshot("account-04b-disliked-moved-on"),
+        wait("dislike accepted", 30.0, |a| idle(a) && !refused(a)),
+        run("take the dislike back", |a| {
+            if let Some(track) = a
+                .queue
+                .iter()
+                .find(|t| Some(&t.video_id) == fact("liked").as_ref())
+                .cloned()
+            {
+                a.account_action(crate::account::AccountAction::Rate {
+                    track,
+                    status: crate::model::LikeStatus::Indifferent,
+                });
+            }
+        }),
+        wait("dislike taken back", 30.0, |a| {
+            idle(a) && shown_like(a, "liked") == Some(crate::model::LikeStatus::Indifferent)
+        }),
+        poll(
+            "no rating, confirmed by a fresh watch-next",
+            90.0,
+            |a| ask_rating(a, "liked"),
+            |a| rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent),
+        ),
         // Save the album, see it in Library → Albums, remove it.
         Step::Screenshot("account-05-album"),
         click("Save to library"),
@@ -4088,6 +4125,31 @@ fn control() -> Vec<Step> {
         wait("N opened Now Playing", 3.0, |a| a.now_playing),
         Step::Key(Key::N),
         wait("N closed it", 3.0, |a| !a.now_playing),
+        // Anywhere on the player bar that isn't a control does the same; its
+        // controls keep their own clicks.
+        click("Elapsed time"),
+        wait("the bar opened Now Playing", 3.0, |a| a.now_playing),
+        Step::Sleep(1.0),
+        click("Elapsed time"),
+        wait("the bar closed it", 3.0, |a| !a.now_playing),
+        Step::Sleep(1.0),
+        click_with("the shuffle button", |a| {
+            Some(
+                if a.playback.shuffle {
+                    "Shuffle on"
+                } else {
+                    "Shuffle off"
+                }
+                .into(),
+            )
+        }),
+        wait("shuffle turned over, Now Playing still closed", 5.0, |a| {
+            Some(a.playback.shuffle.to_string()) != fact("control_shuffle") && !a.now_playing
+        }),
+        Step::Key(Key::S),
+        wait("shuffle as found", 5.0, |a| {
+            Some(a.playback.shuffle.to_string()) == fact("control_shuffle")
+        }),
         Step::Key(Key::Q),
         wait("Q opened Up next", 3.0, |a| {
             a.now_playing && a.now_playing_tab == crate::app::NowPlayingTab::UpNext
