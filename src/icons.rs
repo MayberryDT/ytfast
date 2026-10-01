@@ -1,0 +1,36 @@
+//! Every icon the interface draws: Lucide outlines (ISC, see
+//! assets/icons/LICENSE.txt), tinted by the palette.
+
+fastframe_icons::icons! {
+    pub enum Icon {
+        prefix: "ytfast-icon-",
+        directory: "../assets/icons/",
+        Home => "house",
+        Explore => "compass",
+        Library => "library",
+        SkipBack => "skip-back",
+        SkipForward => "skip-forward",
+        Shuffle => "shuffle",
+        Repeat => "repeat",
+        RepeatOne => "repeat-1",
+        Music => "music",
+        Queue => "list-music",
+        Radio => "radio",
+        Play => lucide "play",
+        Pause => lucide "pause",
+        Search => lucide "search",
+        Volume => lucide "volume-2",
+        Mute => lucide "volume-x",
+        ChevronUp => lucide "chevron-up",
+        ChevronDown => lucide "chevron-down",
+        ChevronLeft => lucide "chevron-left",
+        ChevronRight => lucide "chevron-right",
+        Back => lucide "arrow-left",
+        Close => lucide "x",
+        Copy => lucide "copy",
+        Refresh => lucide "refresh-cw",
+        Alert => lucide "circle-alert",
+        User => lucide "user",
+        Settings => lucide "settings",
+    }
+}

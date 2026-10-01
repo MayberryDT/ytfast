@@ -1,0 +1,78 @@
+[package]
+name = "ytfast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "A native YouTube Music player for Omarchy, built with Rust and egui"
+license = "MIT"
+authors = ["Tyler Mayberry"]
+repository = "https://github.com/MayberryDT/ytfast"
+publish = false
+
+[dependencies]
+# UI framework, as in ZapFast and Spotifast. glow avoids the larger wgpu stack.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11", "persistence"] }
+egui = "0.36"
+# Decodes cover art (JPEG/PNG/WebP) and the SVG icons.
+egui_extras = { version = "0.36", features = ["image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Shared foundation of the ZapFast/Spotifast family (github.com/crmne/fastframe).
+# Every crate comes from the same tag; move them together.
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+fastrand = "2"
+# The backend runtime: InnerTube requests, cover downloads, mpv IPC and yt-dlp.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "brotli"] }
+# Reads the browser's cookie store (a copy; the browser keeps it open).
+rusqlite = "0.37"
+# Chromium's cookie encryption on Linux: PBKDF2-SHA1 key, AES-128-CBC.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+sha2 = "0.10"
+
+[features]
+# The scripted end-to-end run (src/e2e.rs, scripts/e2e.sh). Never in a normal build.
+e2e = []
+
+[patch.crates-io]
+# crmne/egui apps-0.36 and crmne/winit apps-0.30, the revisions ZapFast 0.18.2
+# and Spotifast 0.11.2 pin: Wayland frame pacing by compositor callbacks (a
+# hidden window never blocks in a vsync swap under Hyprland), egui's busy-loop
+# fix, and winit's Occluded state. Move all pins together with those apps.
+ecolor = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+emath = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+epaint = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+winit = { git = "https://github.com/crmne/winit", rev = "544a73716c7a54c916d97d6c86c0b1bdaa81234e" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# Unwind, not abort: a library's background thread that panics must not take
+# the app down. accesskit_unix's D-Bus thread unwraps an error when the
+# desktop's AT-SPI bus refuses connections; with unwind
+# only that thread ends and ytfast runs without screen-reader support.
+panic = "unwind"
+
+# Keep dependencies optimized in development so audio and layout are usable;
+# the application crate itself stays incremental.
+[profile.dev.package."*"]
+opt-level = 2
