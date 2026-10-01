@@ -1368,7 +1368,29 @@ fn put_back(app: &mut App) {
     }
 }
 
-/// Likes and unlikes a song (player bar, then a row), saves and removes an
+/// Plays the test album from the song picked to be liked.
+fn play_liked(a: &mut App) {
+    let Some(page) = a
+        .page_state(&Target::browse(E2E_ALBUM))
+        .and_then(|s| s.page.as_ref())
+    else {
+        return;
+    };
+    let tracks: Vec<crate::model::Track> = page
+        .shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter_map(|i| i.track.clone())
+        .collect();
+    let start = tracks
+        .iter()
+        .position(|t| Some(&t.video_id) == fact("liked").as_ref())
+        .unwrap_or(0);
+    a.backend.send(Command::PlayTracks { tracks, start });
+}
+
+/// Likes and unlikes a song (player bar, then a row), dislikes it from the
+/// player bar (playback moves on) and takes that back, saves and removes an
 /// album, subscribes and unsubscribes, and creates, fills (picker from a
 /// row, picker from the player bar, a drag onto the sidebar), reorders,
 /// trims, renames and deletes a playlist. Each change is confirmed by
@@ -1447,25 +1469,7 @@ fn account() -> Vec<Step> {
                 })
         }),
         // Like from the player bar: play the song, pause before it counts as a play.
-        run("play the song", |a| {
-            let Some(page) = a
-                .page_state(&Target::browse(E2E_ALBUM))
-                .and_then(|s| s.page.as_ref())
-            else {
-                return;
-            };
-            let tracks: Vec<crate::model::Track> = page
-                .shelves
-                .iter()
-                .flat_map(|s| &s.items)
-                .filter_map(|i| i.track.clone())
-                .collect();
-            let start = tracks
-                .iter()
-                .position(|t| Some(&t.video_id) == fact("liked").as_ref())
-                .unwrap_or(0);
-            a.backend.send(Command::PlayTracks { tracks, start });
-        }),
+        run("play the song", play_liked),
         wait("song playing", 90.0, |a| {
             a.playback.playing && a.playback.position > 0.3 && current_id(a) == json!(fact("liked"))
         }),
@@ -1569,6 +1573,17 @@ fn account() -> Vec<Step> {
             |a| ask_rating(a, "liked"),
             |a| rated(a, "liked") == Some(crate::model::LikeStatus::Indifferent),
         ),
+        // The player bar's picker below adds the playing song: the same one again.
+        run("play the song again", play_liked),
+        wait("song playing again", 90.0, |a| {
+            a.playback.playing && a.playback.position > 0.3 && current_id(a) == json!(fact("liked"))
+        }),
+        run("pause it again", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        wait("paused again", 10.0, |a| !a.playback.playing),
         // Save the album, see it in Library → Albums, remove it.
         Step::Screenshot("account-05-album"),
         click("Save to library"),
