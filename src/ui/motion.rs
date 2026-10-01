@@ -4,7 +4,7 @@
 //! temporary memory, so it costs nothing when still and never delays input:
 //! a new target simply redirects whatever is in flight.
 
-use egui::{Context, CornerRadius, Id, Rect, Ui, pos2, vec2};
+use egui::{Context, CornerRadius, Id, Rect, Ui, vec2};
 
 /// Soft overshoot: a cover lands with a small settle, not a bounce.
 const DAMPING: f32 = 0.74;
