@@ -30,8 +30,13 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
     let side_area = Rect::from_min_max(pos2(area.right() - side, area.top()), area.max);
     let current = app.playback.index.and_then(|i| app.queue.get(i));
 
-    // The cover, as large as fits.
-    let size = art_area.width().min(art_area.height() - 72.0).max(120.0);
+    // The cover, as large as fits above the title, artists, account
+    // controls, format and the jump to the most replayed part.
+    let below_height = 200.0;
+    let size = art_area
+        .width()
+        .min(art_area.height() - below_height)
+        .max(120.0);
     let art = Rect::from_center_size(
         pos2(art_area.center().x, art_area.top() + size / 2.0 + 8.0),
         Vec2::splat(size),
