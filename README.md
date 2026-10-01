@@ -45,6 +45,15 @@ And everything you'd expect:
 - Plays count in your YouTube Music history, so your recommendations keep learning
 - Media keys, `playerctl` and the Omarchy bar's media widget (MPRIS), playing on after you close the window, a command line, a mini player, and song-change notifications if you want them
 
+## Keyboard, menus and Play anything
+
+Press **?** to see every shortcut. The common ones: **Space** play or pause, **←/→** back or forward 5 seconds, **Shift+←/→** previous or next song, **+/-** volume, **M** mute, **L** like, **S** shuffle, **R** repeat, **N** Now Playing, **Q** Up next, **F** Stage (**F11** full screen inside it), **P** the most replayed part, **/** search, **Alt+←/→** back and forward, **E** equalizer, **Ctrl+,** Settings, **Esc** closes what's on top. Hold **Alt** over a song to audition it. They don't fire while you type in a field.
+
+Right-click a song, album, playlist or artist (or use its **⋮**) for Play next, Add to queue, Start radio, Like, Add to playlist, Save to library, Go to album or artist and Copy link. Menus work from the keyboard too: arrows, Enter, Esc.
+
+**Ctrl+K** opens Play anything: type and it finds your library, recent searches, the page you're on and YouTube Music; Enter plays the top match, Shift+Enter opens its page. It takes commands as well: `radio <song or artist>`, `like`, `next`, `pause`, `play`, `shuffle`, `repeat`, `sleep 30` (or `sleep end`), `eq bass`, `mini`.
+
+**Save** in Up next makes the queue a playlist.
 ## On the desktop
 
 Closing the window keeps the music playing. Launch Music again (or run `ytfast show`, or raise it from the media widget) and it comes back where you left it. **Ctrl+Q** quits and stops the music; closing the window with nothing queued quits too.

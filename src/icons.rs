@@ -46,5 +46,14 @@ fastframe_icons::icons! {
         Pencil => lucide "pencil",
         Trash => lucide "trash-2",
         Moon => lucide "moon",
+        More => "ellipsis-vertical",
+        PlayNext => "list-start",
+        AddToQueue => "list-end",
+        RemoveFromQueue => "list-x",
+        Album => "disc-3",
+        Link => "link",
+        Keyboard => "keyboard",
+        Bell => "bell",
+        BellOff => "bell-off",
     }
 }

@@ -3,7 +3,7 @@
 # on this machine's desktop with the signed-in browser session. Run them from
 # the repository, on a machine you don't mind it taking over:
 #
-#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|surfaces|deck]
+#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|surfaces|deck|control]
 #
 #   journey   every surface, playback (Premium, gapless, seek, next), history
 #   recovery  signed out → Reconnect; a stream that fails once, one that keeps failing
@@ -28,6 +28,10 @@
 #             moving, queue unchanged) and Smooth mixes (a radio's equal-power
 #             blend across two mpv decks; an album stays gapless on one); puts
 #             the volume, repeat, shuffle and the setting back
+#   control   the keyboard map and `?` overlay, Play anything (Ctrl+K, type, Enter
+#             timed to audible), right-click menus (Play next, Add to queue, Go to
+#             artist, Copy link), the queue saved as a playlist and deleted again;
+#             leaves the account, volume, shuffle and repeat as found
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in

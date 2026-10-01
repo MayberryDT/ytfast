@@ -145,7 +145,7 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
         ui.add_space(8.0);
     }
     if let Some(header) = &page.header {
-        page_header(ui, header, page, p, actions);
+        page_header(ui, header, page, &state.target, p, actions);
         ui.add_space(28.0);
     }
     if !page.chips.is_empty() {
@@ -300,14 +300,27 @@ pub(super) fn skeleton_shelf(ui: &mut Ui, p: &Palette) {
         .request_repaint_after(std::time::Duration::from_millis(50));
 }
 
-fn page_header(ui: &mut Ui, h: &Header, page: &Page, p: &Palette, actions: &mut Vec<Action>) {
+fn page_header(
+    ui: &mut Ui,
+    h: &Header,
+    page: &Page,
+    target: &Target,
+    p: &Palette,
+    actions: &mut Vec<Action>,
+) {
     if h.thumbnail.is_none() && h.play.is_none() && h.subtitle.is_empty() {
         label(ui, &h.title, 32.0, Weight::Bold, p.text);
         return;
     }
     ui.horizontal_top(|ui| {
         let size = 232.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        let (rect, cover) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+        super::menu::on_secondary(
+            ui,
+            &cover,
+            || Some(super::menu::subject_of_header(h, target)),
+            actions,
+        );
         let site = motion::header_site();
         landing_cover(ui, site, rect, h.thumbnail.as_deref(), h.round, 8, p);
         if let Some(url) = &h.thumbnail {
@@ -389,6 +402,13 @@ fn page_header(ui: &mut Ui, h: &Header, page: &Page, p: &Palette, actions: &mut 
                 }
                 ui.add_space(8.0);
                 super::account::header_actions(ui, h, p, actions);
+                ui.add_space(4.0);
+                let more =
+                    super::widgets::icon_button(ui, Icon::More, 20.0, p.text, p, "More actions");
+                if more.clicked() {
+                    let subject = super::menu::subject_of_header(h, target);
+                    super::menu::open(ui.ctx(), subject, more.rect.left_bottom(), actions);
+                }
             });
         });
     });

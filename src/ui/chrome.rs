@@ -129,6 +129,12 @@ pub(super) fn sidebar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Act
                     p.secondary,
                 );
                 super::account::playlist_drop_target(ui, &response, rect, item, p, actions);
+                super::menu::on_secondary(
+                    ui,
+                    &response,
+                    || super::menu::subject_of(item, super::menu::Place::List),
+                    actions,
+                );
                 if named(response, &item.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
@@ -178,6 +184,7 @@ fn search_box(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>
             );
             ui.add_space(26.0);
             let edit = egui::TextEdit::singleline(&mut app.search)
+                .id(super::keys::search_field())
                 .hint_text(RichText::new("Search songs, albums, artists, playlists").color(p.dim))
                 .font(font(Weight::Regular, 15.0))
                 .frame(egui::Frame::NONE)

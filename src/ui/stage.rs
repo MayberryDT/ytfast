@@ -16,7 +16,7 @@ use crate::backend::Command;
 use crate::icons::Icon;
 use crate::model::{Lyrics, Track, format_time};
 use crate::theme::Palette;
-use egui::{Align2, Color32, CornerRadius, Id, Key, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Id, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 use fastframe_fonts::Weight;
 
 /// Chrome fades after the pointer rests this long (seconds).
@@ -65,24 +65,6 @@ impl Stage {
         let sum: f32 = self.frames.iter().sum();
         let worst = self.frames.iter().copied().fold(0.0, f32::max);
         (sum / n as f32 * 1000.0, worst * 1000.0, n)
-    }
-}
-
-/// Stage's keys: `F` opens and closes it, `Esc` closes it, `F11` toggles
-/// full screen while it is open.
-pub(super) fn keys(app: &App, i: &egui::InputState, typing: bool, actions: &mut Vec<Action>) {
-    if app.stage.open && i.key_pressed(Key::Escape) {
-        actions.push(Action::Stage(false));
-        return;
-    }
-    if typing {
-        return;
-    }
-    if i.modifiers.is_none() && i.key_pressed(Key::F) {
-        actions.push(Action::Stage(!app.stage.open));
-    }
-    if app.stage.open && i.key_pressed(Key::F11) {
-        actions.push(Action::StageFullscreen);
     }
 }
 

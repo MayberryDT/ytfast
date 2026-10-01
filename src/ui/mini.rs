@@ -16,7 +16,7 @@ pub const SIZE: [f32; 2] = [380.0, 128.0];
 
 pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let p = app.palette.clone();
-    super::keyboard(app, ui, actions);
+    super::keys::handle(app, ui.ctx(), actions);
     egui::CentralPanel::no_frame().show(ui, |ui| {
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, p.panel);

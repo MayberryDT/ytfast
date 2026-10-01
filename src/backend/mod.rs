@@ -138,6 +138,9 @@ pub enum Command {
     /// E2E: read every deck's volume and position back five times a second.
     #[cfg(feature = "e2e")]
     SampleDecks(bool),
+    /// Search YouTube Music for Play anything (Ctrl+K): answered with
+    /// [`Event::QuickResults`], never saved to disk.
+    QuickSearch(String),
 }
 
 pub enum Event {
@@ -189,6 +192,11 @@ pub enum Event {
     Heat {
         id: String,
         heat: Option<crate::heat::Heat>,
+    },
+    /// The answer to `Command::QuickSearch` for `query`.
+    QuickResults {
+        query: String,
+        result: Result<Box<Page>, String>,
     },
 }
 
@@ -774,6 +782,18 @@ impl Worker {
             Command::Mixes(mixes) => self.set_mixes(mixes).await,
             #[cfg(feature = "e2e")]
             Command::SampleDecks(on) => self.sample_decks(on),
+            Command::QuickSearch(query) => {
+                let client = self.client.clone();
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .search(&query, None)
+                        .await
+                        .map(|v| Box::new(parse::page(&v)))
+                        .map_err(|e| e.to_string());
+                    sink.send(Event::QuickResults { query, result });
+                });
+            }
         }
     }
 

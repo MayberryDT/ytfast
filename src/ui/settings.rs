@@ -9,6 +9,10 @@ use fastframe_fonts::Weight;
 
 pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
     let response = icon_button(ui, Icon::Settings, 20.0, p.secondary, p, "Settings");
+    // Ctrl+, opens (or closes) it as a click would.
+    if super::keys::settings_asked(ui.ctx()) {
+        egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&response));
+    }
     egui::Popup::menu(&response).width(320.0).show(|ui| {
         ui.set_min_width(300.0);
         label(ui, "Audio quality", 12.0, Weight::SemiBold, p.secondary);

@@ -178,6 +178,8 @@ pub enum Action {
     /// A song is held under the pointer this frame (Alt or the middle
     /// button): audition it. Not pushing it ends the audition.
     Audition(Track),
+    /// The keyboard map, context menus and Play anything (see `crate::control`).
+    Control(crate::control::ControlAction),
 }
 
 pub struct App {
@@ -268,6 +270,8 @@ pub struct App {
     /// Alt went down with another key (Alt+←): a shortcut, not an
     /// audition, until Alt is up again.
     audition_blocked: bool,
+    /// Forward, mute, Play anything and pages fetched for a menu.
+    pub control: crate::control::ControlState,
 }
 
 impl App {
@@ -354,6 +358,7 @@ impl App {
             audition_held: None,
             auditioning: None,
             audition_blocked: false,
+            control: Default::default(),
         };
         app.start_themes();
         app.ensure_page(View::Home.target(), false);
@@ -585,6 +590,7 @@ impl App {
             Event::Heat { id, heat } => {
                 self.heat.insert(id, heat.map(Arc::new));
             }
+            Event::QuickResults { query, result } => self.quick_results(query, result),
         }
     }
 
@@ -600,6 +606,7 @@ impl App {
         if view != self.view {
             let previous = std::mem::replace(&mut self.view, view);
             self.history.push(previous);
+            self.control.forward.clear();
             if self.history.len() > 50 {
                 self.history.remove(0);
             }
@@ -616,7 +623,8 @@ impl App {
                 if let Some(view) = self.history.pop() {
                     // The header's cover flies back to the card it came from.
                     crate::ui::motion::launch_from_origin(ctx, "header", None);
-                    self.view = view;
+                    let left = std::mem::replace(&mut self.view, view);
+                    self.control.forward.push(left);
                     self.now_playing = false;
                     self.ensure_page(self.view.target(), false);
                 }
@@ -751,6 +759,7 @@ impl App {
             Action::ToggleLikeCurrent => self.toggle_like_current(),
             Action::Account(action) => self.account_action(action),
             Action::ShowEqualizer(open) => self.equalizer_open = open,
+            Action::Control(action) => self.control_action(ctx, action),
             Action::Stage(open) => self.set_stage(ctx, open),
             Action::StageFullscreen => {
                 if self.stage.open {
@@ -1184,6 +1193,7 @@ impl App {
         self.cover_frame(&ctx);
         self.heat_frame();
         crate::derived::paint_frame(&ctx, self.paint_covers.then_some(&self.palette));
+        self.control_frame(&ctx);
 
         #[cfg(feature = "e2e")]
         let registry = crate::e2e::take_registry(&ctx);
