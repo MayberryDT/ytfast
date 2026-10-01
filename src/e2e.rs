@@ -3155,6 +3155,13 @@ fn surfaces() -> Vec<Step> {
         // The pointer rests: the chrome fades.
         wait("chrome faded", 10.0, |a| a.stage.chrome < 0.05),
         Step::Screenshot("s06-stage-chrome-faded"),
+        // Keys for things Stage doesn't show do nothing there: one Esc closes it.
+        Step::KeyWith(egui::Modifiers::SHIFT, egui::Key::Questionmark),
+        Step::KeyWith(egui::Modifiers::COMMAND, egui::Key::K),
+        Step::Sleep(0.3),
+        wait("no hidden overlay or palette under Stage", 1.0, |a| {
+            a.stage.open && !a.control.help && !a.control.play_anything.open
+        }),
         Step::Key(egui::Key::Escape),
     ]);
     steps.extend(burst(&[
