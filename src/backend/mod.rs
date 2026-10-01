@@ -114,6 +114,11 @@ pub enum Command {
     /// Resolve songs likely to be played next (on screen when a page
     /// loads), most likely first, without delaying playback.
     PrepareMany(Vec<String>),
+    /// Most-replayed heat for a song (by video id), asked once per song;
+    /// answered with [`Event::Heat`].
+    Heat(String),
+    /// Settings: theme-painted covers on or off (saved for next time).
+    PaintCovers(bool),
 }
 
 pub enum Event {
@@ -161,6 +166,11 @@ pub enum Event {
     Likes(Vec<(String, crate::model::LikeStatus)>),
     /// Pages to fetch again after an account change.
     AccountRefresh(Vec<Target>),
+    /// A song's most-replayed heat; `None` when it has none or the request failed.
+    Heat {
+        id: String,
+        heat: Option<crate::heat::Heat>,
+    },
 }
 
 #[derive(Clone)]
@@ -669,6 +679,29 @@ impl Worker {
                 if let Err(error) = settings.save(&self.paths) {
                     self.sink.send(Event::Error(format!(
                         "Couldn't save the notification setting: {error}"
+                    )));
+                }
+            }
+            Command::Heat(video_id) => {
+                let http = self.client.http().clone();
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    let heat = match crate::heat::fetch(&http, &video_id).await {
+                        Ok(heat) => heat,
+                        Err(error) => {
+                            log::warn!("most replayed for {video_id}: {error}");
+                            None
+                        }
+                    };
+                    sink.send(Event::Heat { id: video_id, heat });
+                });
+            }
+            Command::PaintCovers(on) => {
+                let mut settings = crate::settings::Settings::load(&self.paths);
+                settings.paint_covers = on;
+                if let Err(error) = settings.save(&self.paths) {
+                    self.sink.send(Event::Error(format!(
+                        "Couldn't save the cover painting setting: {error}"
                     )));
                 }
             }

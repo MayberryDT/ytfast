@@ -19,6 +19,9 @@ pub struct Settings {
     pub normalize: Option<bool>,
     #[serde(default)]
     pub equalizer: crate::equalizer::Equalizer,
+    /// Draw covers outside Now Playing and Stage in the theme's colours (off by default).
+    #[serde(default)]
+    pub paint_covers: bool,
 }
 
 impl Settings {

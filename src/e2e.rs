@@ -108,6 +108,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "account" => account(),
         "engine" => engine(),
         "engine-restore" => engine_restore(),
+        "surfaces" => surfaces(),
         _ => journey(),
     }
 }
@@ -856,6 +857,8 @@ enum Step {
         refresh: Run,
         check: Check,
     },
+    /// Moves the pointer off the window.
+    Leave,
 }
 
 fn wait(what: &'static str, timeout: f64, check: impl Fn(&App) -> bool + 'static) -> Step {
@@ -2747,6 +2750,173 @@ fn engine_restore() -> Vec<Step> {
     ]
 }
 
+/// Signature surfaces (docs/SPEC.md § Signature moments): the most-replayed
+/// ridge on the player bar at rest and under the pointer, the jump to the
+/// most replayed part, Stage (the cover's flight in, timed lyrics, frame
+/// times, the chrome fading, the flight back), and theme-painted covers
+/// across a switch to a light theme and back. Restores the theme, the
+/// setting and the recent searches it found.
+fn surfaces() -> Vec<Step> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let home = View::Home.target();
+    let original = omarchy_theme().unwrap_or_else(|| "Permafrost".into());
+    let light = std::env::var("YTFAST_E2E_LIGHT_THEME").unwrap_or_else(|_| "Snow".into());
+    let saved: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (saved_1, saved_2) = (saved.clone(), saved);
+    let peak_of = |a: &App| a.current_heat().and_then(|h| h.peak);
+    let mut steps = vec![
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 1)),
+        run("note the recent searches", move |a| {
+            *saved_1.borrow_mut() = a.recent_searches.clone();
+        }),
+        run("clear the search field", |a| a.search.clear()),
+        click("Search"),
+        Step::Type("Daft Punk Get Lucky".into()),
+        Step::Key(egui::Key::Enter),
+        wait("search results", 60.0, searched),
+        click_with("Get Lucky's cover", |a| {
+            song_on_page(a, "Get Lucky").map(|t| format!("Play {}", t.title))
+        }),
+        wait("playing", 90.0, |a| {
+            a.playback.playing && a.playback.position > 0.5 && a.playback.duration > 0.0
+        }),
+        // Most replayed: asked for once per song, anonymously.
+        wait("heat answered", 30.0, |a| {
+            a.current_track()
+                .is_some_and(|t| a.heat.contains_key(&t.video_id))
+        }),
+        measure("heat", |a| {
+            let heat = a.current_heat();
+            json!({
+                "video_id": a.current_track().map(|t| t.video_id.clone()),
+                "title": a.current_track().map(|t| t.title.clone()),
+                "markers": heat.map(|h| h.markers.len()),
+                "length": heat.map(crate::heat::Heat::length),
+                "duration": a.playback.duration,
+                "peak": heat.and_then(|h| h.peak).map(|p| json!({"start": p.start, "end": p.end, "at": p.at})),
+            })
+        }),
+        wait("the song has heat", 1.0, move |a| peak_of(a).is_some()),
+        Step::Sleep(1.5),
+        Step::Screenshot("s01-ridge-rest"),
+        hover_with("Seek", |_| Some("Seek".into())),
+        Step::Sleep(1.0),
+        Step::Screenshot("s02-ridge-hover"),
+        Step::Leave,
+        Step::Sleep(0.5),
+        // The jump to the peak, from Now Playing.
+        click("Cover"),
+        wait("now playing", 10.0, |a| a.now_playing),
+        Step::Sleep(1.0),
+        click("Jump to the most replayed part"),
+        wait("at the most replayed part", 15.0, move |a| {
+            peak_of(a).is_some_and(|p| {
+                a.playback.position >= p.start - 0.5 && a.playback.position <= p.end + 0.5
+            })
+        }),
+        measure("jump_to_peak", move |a| {
+            json!({
+                "position": a.playback.position,
+                "peak": peak_of(a).map(|p| json!({"start": p.start, "end": p.end})),
+            })
+        }),
+        Step::Sleep(1.0),
+        Step::Screenshot("s03-now-playing-peak"),
+        // Stage: the cover flies from Now Playing into it.
+        Step::Key(egui::Key::F),
+    ];
+    steps.extend(burst(&[
+        "s04-stage-flight-a",
+        "s04-stage-flight-b",
+        "s04-stage-flight-c",
+        "s04-stage-flight-d",
+        "s04-stage-flight-e",
+    ]));
+    steps.extend([
+        wait("stage open", 5.0, |a| a.stage.open),
+        wait("timed lyrics", 45.0, |a| timed_lines(a).is_some()),
+        measure("stage_lyrics", |a| {
+            json!({"state": lyrics_state(a), "lit": lyric_index(a), "position": a.position_now()})
+        }),
+        // The pointer moves: the chrome shows.
+        hover_with("Stage cover", |_| Some("Stage cover".into())),
+        Step::Sleep(1.5),
+        Step::Screenshot("s05-stage"),
+        measure("stage_chrome_shown", |a| json!(a.stage.chrome)),
+        run("count Stage's frames from here", |a| a.stage.clear_frames()),
+        Step::Sleep(3.0),
+        measure("stage_frames", |a| {
+            let (mean, worst, frames) = a.stage.frame_times();
+            json!({"mean_stable_dt_ms": mean, "worst_stable_dt_ms": worst, "frames": frames})
+        }),
+        wait("Stage frames under 20 ms on average", 1.0, |a| {
+            let (mean, _, frames) = a.stage.frame_times();
+            frames > 0 && mean < 20.0
+        }),
+        // The pointer rests: the chrome fades.
+        wait("chrome faded", 10.0, |a| a.stage.chrome < 0.05),
+        Step::Screenshot("s06-stage-chrome-faded"),
+        Step::Key(egui::Key::Escape),
+    ]);
+    steps.extend(burst(&[
+        "s07-stage-close-a",
+        "s07-stage-close-b",
+        "s07-stage-close-c",
+        "s07-stage-close-d",
+    ]));
+    let home2 = View::Home.target();
+    steps.extend([
+        wait("stage closed", 5.0, |a| !a.stage.open && a.now_playing),
+        Step::Sleep(1.0),
+        click("Close player"),
+        run("open Home", |a| a.open(View::Home)),
+        wait("home", 30.0, move |a| {
+            a.view == View::Home && loaded(a, &home2, 1)
+        }),
+        // Theme-painted covers, across a theme switch and back.
+        click("Settings"),
+        click("Paint covers"),
+        wait("painting on", 10.0, |a| a.paint_covers),
+        Step::Key(egui::Key::Escape),
+        Step::Sleep(4.0),
+        Step::Screenshot("s08-painted-home"),
+        measure(
+            "painted_theme",
+            |a| json!({"dark": a.palette.dark, "window": format!("{:?}", a.palette.window)}),
+        ),
+        run("switch to a light theme", move |_| set_theme(&light)),
+        wait("light colours", 120.0, |a| !a.palette.dark),
+        Step::Sleep(4.0),
+        Step::Screenshot("s09-painted-light"),
+        measure(
+            "painted_light_theme",
+            |a| json!({"dark": a.palette.dark, "window": format!("{:?}", a.palette.window)}),
+        ),
+        run("switch the theme back", move |_| set_theme(&original)),
+        wait("dark colours", 120.0, |a| a.palette.dark),
+        Step::Sleep(4.0),
+        Step::Screenshot("s10-painted-back"),
+        click("Settings"),
+        click("Paint covers"),
+        wait("painting off", 10.0, |a| !a.paint_covers),
+        Step::Key(egui::Key::Escape),
+        Step::Sleep(2.0),
+        Step::Screenshot("s11-unpainted-home"),
+        run("restore the recent searches", move |a| {
+            a.recent_searches = saved_2.borrow().clone();
+            a.backend
+                .send(Command::SaveSearches(a.recent_searches.clone()));
+        }),
+        run("pause", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+    ]);
+    steps
+}
+
 enum Phase {
     Idle,
     Move(Pos2),
@@ -3032,6 +3202,11 @@ impl Driver {
                     }
                     None => {}
                 }
+            }
+            Step::Leave => {
+                self.pending.push(Event::PointerGone);
+                self.note("pointer leaves");
+                self.advance();
             }
             Step::Drag { from, to, describe } => match self.drag {
                 None => {
