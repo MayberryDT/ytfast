@@ -1,0 +1,83 @@
+//! The interface, laid out like YouTube Music: navigation on the left, the
+//! search bar on top, the page in the middle and the player bar below.
+//! Views read [`App`] and push [`Action`]s.
+
+mod chrome;
+mod now_playing;
+mod pages;
+mod player;
+mod settings;
+mod shelves;
+mod widgets;
+
+use crate::app::{Action, App};
+use crate::backend::Command;
+use chrome::{errors, sidebar, top_bar};
+use egui::{Frame, Margin, Ui};
+use now_playing::now_playing;
+use pages::content;
+use player::player_bar;
+
+const SIDEBAR: f32 = 232.0;
+const TOPBAR: f32 = 64.0;
+const PLAYER: f32 = 76.0;
+const CARD: f32 = 176.0;
+const GAP: f32 = 16.0;
+
+pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let p = app.palette.clone();
+    keyboard(app, ui, actions);
+    if !app.queue.is_empty() {
+        egui::Panel::bottom("player")
+            .exact_size(PLAYER)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(p.panel))
+            .show(ui, |ui| player_bar(app, ui, &p, actions));
+    }
+    egui::Panel::left("navigation")
+        .exact_size(SIDEBAR)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(Frame::new().fill(p.window).inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 14,
+            bottom: 8,
+        }))
+        .show(ui, |ui| sidebar(app, ui, &p, actions));
+    egui::Panel::top("top")
+        .exact_size(TOPBAR)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(
+            Frame::new()
+                .fill(p.window)
+                .inner_margin(Margin::symmetric(24, 12)),
+        )
+        .show(ui, |ui| top_bar(app, ui, &p, actions));
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        ui.painter().rect_filled(ui.max_rect(), 0.0, p.window);
+        if app.now_playing {
+            now_playing(app, ui, &p, actions);
+        } else {
+            content(app, ui, &p, actions);
+        }
+        errors(app, ui, &p, actions);
+    });
+}
+
+fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
+    let typing = ui.ctx().memory(|m| m.focused().is_some());
+    ui.input(|i| {
+        if !typing && i.key_pressed(egui::Key::Space) && !app.queue.is_empty() {
+            actions.push(Action::Command(Command::TogglePause));
+        }
+        if i.key_pressed(egui::Key::Escape) && app.now_playing {
+            actions.push(Action::NowPlaying(false));
+        }
+        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
+            actions.push(Action::Back);
+        }
+    });
+}
