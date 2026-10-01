@@ -3,7 +3,7 @@
 # on this machine's desktop with the signed-in browser session. Run them from
 # the repository, on a machine you don't mind it taking over:
 #
-#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore]
+#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|deck]
 #
 #   journey   every surface, playback (Premium, gapless, seek, next), history
 #   recovery  signed out → Reconnect; a stream that fails once, one that keeps failing
@@ -21,6 +21,10 @@
 #             loudness levelling in mpv, sleep timer; leaves a session (sets the
 #             volume to 63 and the Rock preset until engine-restore)
 #   engine-restore  run right after engine: the session came back; puts settings back
+#   deck      Audition (Alt held over a song: main deck ducked and back, both songs
+#             moving, queue unchanged) and Smooth mixes (a radio's equal-power
+#             blend across two mpv decks; an album stays gapless on one); puts
+#             the volume, repeat, shuffle and the setting back
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in

@@ -1,7 +1,10 @@
 //! An audio-only mpv process controlled over its JSON IPC socket.
 //!
 //! mpv plays the resolved stream URLs; ytfast keeps at most the current and
-//! the next track in mpv's playlist, so track changes are gapless.
+//! the next track in an mpv's playlist, so track changes are gapless. Smooth
+//! mixes and Audition run more than one process at once ("decks"); every
+//! process has a serial that tags its events, so the worker can tell whose
+//! they are as the decks swap roles.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{Mutex, mpsc, oneshot};
+
+/// Serials of mpv processes, unique for the run.
+static SERIAL: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub enum MpvEvent {
@@ -36,6 +42,7 @@ pub enum MpvEvent {
 }
 
 pub struct Mpv {
+    serial: u64,
     writer: Mutex<OwnedWriteHalf>,
     next_id: AtomicU64,
     pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
@@ -55,11 +62,14 @@ const OBSERVED: &[&str] = &[
 ];
 
 impl Mpv {
+    /// Starts a process; its events arrive on `events` tagged with its
+    /// [`serial`](Self::serial).
     pub async fn spawn(
         socket: &Path,
         volume: f64,
-        events: mpsc::UnboundedSender<MpvEvent>,
+        events: mpsc::UnboundedSender<(u64, MpvEvent)>,
     ) -> Result<Arc<Self>> {
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let _ = std::fs::remove_file(socket);
         let mut child = tokio::process::Command::new("mpv")
             .args([
@@ -131,13 +141,14 @@ impl Mpv {
                     },
                     _ => continue,
                 };
-                if events.send(event).is_err() {
+                if events.send((serial, event)).is_err() {
                     return;
                 }
             }
-            let _ = events.send(MpvEvent::Died);
+            let _ = events.send((serial, MpvEvent::Died));
         });
         let mpv = Arc::new(Self {
+            serial,
             writer: Mutex::new(writer),
             next_id: AtomicU64::new(1),
             pending,
@@ -148,6 +159,11 @@ impl Mpv {
                 .await?;
         }
         Ok(mpv)
+    }
+
+    /// This process's serial: its events carry it.
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// Runs a command and returns its `data`.

@@ -322,6 +322,49 @@ impl Resolver {
         self.prepare_many(vec![video_id.to_owned()]);
     }
 
+    /// Waits for a song through the speculative path: prepared ahead (most
+    /// likely first), sharing a run already under way, never taking a
+    /// playback slot. For previews (Audition), which must not delay playback.
+    pub async fn prepared(self: &Arc<Self>, video_id: &str) -> Result<Stream> {
+        #[cfg(feature = "e2e")]
+        if crate::e2e::offline() {
+            bail!("Unable to reach YouTube (simulated offline)");
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            if let Some(stream) = self.cached(video_id) {
+                return Ok(stream);
+            }
+            let share = {
+                let flights = self.flights.lock().expect("flights lock");
+                flights.get(video_id).cloned().map(|flight| {
+                    flight.waiters.fetch_add(1, Ordering::SeqCst);
+                    Waiting {
+                        resolver: self.clone(),
+                        id: video_id.to_owned(),
+                        flight,
+                    }
+                })
+            };
+            if let Some(share) = share {
+                return Request::Waiting(share).wait().await;
+            }
+            if Instant::now() > deadline {
+                bail!("the stream lookup took too long");
+            }
+            // Still waiting for a speculative slot: stay first in line.
+            self.prepare(video_id);
+            if !self
+                .flights
+                .lock()
+                .expect("flights lock")
+                .contains_key(video_id)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+
     /// Starts guesses from the backlog while speculative slots are free.
     fn pump(self: &Arc<Self>) {
         loop {

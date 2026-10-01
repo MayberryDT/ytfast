@@ -113,6 +113,7 @@ impl super::Worker {
     /// A player response arrived; the current song takes its gain at once.
     pub(super) async fn player_arrived(&mut self, video_id: String, info: PlayerInfo) {
         self.remember_player(video_id.clone(), info);
+        self.audition_gain(&video_id).await;
         if self.current_entry.is_some()
             && self.current().is_some_and(|t| t.video_id == video_id)
             && let Some(gain) = self.gain_for(&video_id)
@@ -146,7 +147,9 @@ impl super::Worker {
         {
             self.apply_gain(gain).await;
         }
-        // The song queued behind carries its own gain: queue it again.
+        if let Some(id) = self.state.audition.as_ref().map(|a| a.video_id.clone()) {
+            self.audition_gain(&id).await;
+        }
         if self.appended.is_some() {
             self.drop_appended().await;
             self.prefetch();
@@ -180,40 +183,40 @@ impl super::Worker {
         let before = std::mem::replace(&mut self.state.equalizer, equalizer);
         self.emit(true);
         self.eq_stamp += 1;
-        if let Some(mpv) = self.mpv.clone() {
+        let decks = self.decks();
+        if !decks.is_empty() {
             let now = &self.state.equalizer;
             if before.active() && now.active() && !self.af.is_empty() {
                 // The same graph: change its bands in place, without a gap.
-                for (i, (old, new)) in before.gains.iter().zip(now.gains).enumerate() {
-                    if (old - new).abs() >= 0.05 {
+                for mpv in &decks {
+                    for (i, (old, new)) in before.gains.iter().zip(now.gains).enumerate() {
+                        if (old - new).abs() >= 0.05 {
+                            let _ = mpv
+                                .command(json!([
+                                    "af-command",
+                                    LABEL,
+                                    "g",
+                                    format!("{new:.1}"),
+                                    format!("equalizer@b{i}")
+                                ]))
+                                .await;
+                        }
+                    }
+                    if (before.preamp() - now.preamp()).abs() >= 0.05 {
                         let _ = mpv
                             .command(json!([
                                 "af-command",
                                 LABEL,
-                                "g",
-                                format!("{new:.1}"),
-                                format!("equalizer@b{i}")
+                                "volume",
+                                format!("{:.1}dB", now.preamp()),
+                                "volume@pre"
                             ]))
                             .await;
                     }
                 }
-                if (before.preamp() - now.preamp()).abs() >= 0.05 {
-                    let _ = mpv
-                        .command(json!([
-                            "af-command",
-                            LABEL,
-                            "volume",
-                            format!("{:.1}dB", now.preamp()),
-                            "volume@pre"
-                        ]))
-                        .await;
-                }
             } else {
                 let filter = now.filter();
-                match mpv.set("af", json!(filter)).await {
-                    Ok(()) => self.af = filter,
-                    Err(error) => log::warn!("couldn't set the equalizer: {error:#}"),
-                }
+                self.set_af(&decks, filter).await;
             }
         }
         let stamp = self.eq_stamp;
@@ -230,18 +233,28 @@ impl super::Worker {
             return;
         }
         let filter = self.state.equalizer.filter();
-        if let Some(mpv) = self.mpv.clone()
-            && filter != self.af
-        {
-            match mpv.set("af", json!(filter)).await {
-                Ok(()) => self.af = filter,
-                Err(error) => log::warn!("couldn't set the equalizer: {error:#}"),
-            }
+        if filter != self.af {
+            let decks = self.decks();
+            self.set_af(&decks, filter).await;
         }
         let equalizer = self.state.equalizer.clone();
         self.update_settings(|s| s.equalizer = equalizer);
         #[cfg(feature = "e2e")]
         self.probe_af();
+    }
+
+    /// Gives every deck the equalizer graph `filter`.
+    async fn set_af(&mut self, decks: &[Arc<Mpv>], filter: String) {
+        let mut applied = false;
+        for mpv in decks {
+            match mpv.set("af", json!(filter)).await {
+                Ok(()) => applied = true,
+                Err(error) => log::warn!("couldn't set the equalizer: {error:#}"),
+            }
+        }
+        if applied {
+            self.af = filter;
+        }
     }
 
     // ---- sleep timer ----
@@ -341,20 +354,15 @@ impl super::Worker {
             return;
         }
         self.fade = share;
-        let volume = self.state.volume * share;
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv.set("volume", json!(volume)).await;
-        }
+        self.apply_volumes().await;
         #[cfg(feature = "e2e")]
-        crate::e2e::probe_push("sleep_fade", json!(volume));
+        crate::e2e::probe_push("sleep_fade", json!(self.state.volume * share));
     }
 
     pub(super) async fn restore_fade(&mut self) {
         if self.fade < 1.0 {
             self.fade = 1.0;
-            if let Some(mpv) = &self.mpv {
-                let _ = mpv.set("volume", json!(self.state.volume)).await;
-            }
+            self.apply_volumes().await;
         }
     }
 
@@ -362,6 +370,7 @@ impl super::Worker {
     async fn sleep_now(&mut self) {
         self.sleep_stamp.fetch_add(1, Ordering::SeqCst);
         self.state.sleep = None;
+        self.finish_blend().await;
         if let (Some(mpv), false) = (&self.mpv, self.idle) {
             let _ = mpv.set("pause", json!(true)).await;
         }

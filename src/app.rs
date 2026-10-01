@@ -167,6 +167,9 @@ pub enum Action {
     Account(crate::account::AccountAction),
     /// Show or hide the equalizer.
     ShowEqualizer(bool),
+    /// A song is held under the pointer this frame (Alt or the middle
+    /// button): audition it. Not pushing it ends the audition.
+    Audition(Track),
 }
 
 pub struct App {
@@ -244,6 +247,12 @@ pub struct App {
     pub equalizer_open: bool,
     /// The songs last prepared for being on screen.
     on_screen: Vec<String>,
+    /// The song held for an audition this frame, and the one auditioned.
+    audition_held: Option<Track>,
+    auditioning: Option<String>,
+    /// Alt went down with another key (Alt+←): a shortcut, not an
+    /// audition, until Alt is up again.
+    audition_blocked: bool,
 }
 
 impl App {
@@ -322,6 +331,9 @@ impl App {
             themed: false,
             equalizer_open: false,
             on_screen: Vec::new(),
+            audition_held: None,
+            auditioning: None,
+            audition_blocked: false,
         };
         app.start_themes();
         app.ensure_page(View::Home.target(), false);
@@ -713,6 +725,45 @@ impl App {
             Action::ToggleLikeCurrent => self.toggle_like_current(),
             Action::Account(action) => self.account_action(action),
             Action::ShowEqualizer(open) => self.equalizer_open = open,
+            Action::Audition(track) => self.audition_held = Some(track),
+        }
+    }
+
+    /// After a frame's actions: what is held under the pointer becomes the
+    /// audition, and nothing held ends it. Alt pressed with another key is a
+    /// shortcut (Alt+← Back), so it auditions nothing until Alt is let go.
+    fn audition_frame(&mut self, ctx: &egui::Context) {
+        let (alt, key, middle) = ctx.input(|i| {
+            let key = i
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }));
+            (i.modifiers.alt, key, i.pointer.middle_down())
+        });
+        if !alt {
+            self.audition_blocked = false;
+        } else if key {
+            self.audition_blocked = true;
+        }
+        let held = self
+            .audition_held
+            .take()
+            .filter(|_| middle || !self.audition_blocked);
+        match held {
+            Some(track) if self.auditioning.as_deref() != Some(track.video_id.as_str()) => {
+                self.auditioning = Some(track.video_id.clone());
+                // The best part; the most replayed point once Stage knows it.
+                let start = crate::ui::audition::best_part(&track);
+                self.backend.send(Command::Audition { track, start });
+            }
+            Some(_) => {}
+            None => self.end_audition(),
+        }
+    }
+
+    fn end_audition(&mut self) {
+        if self.auditioning.take().is_some() {
+            self.backend.send(Command::EndAudition);
         }
     }
 
@@ -932,6 +983,7 @@ impl App {
             }
             Command::Equalizer(equalizer) => self.playback.equalizer = equalizer.clone(),
             &Command::Normalize(on) => self.playback.normalize = on,
+            &Command::Mixes(mixes) => self.playback.mixes = mixes,
             &Command::SleepTimer(choice) => {
                 self.playback.sleep = choice.map(|choice| crate::model::SleepTimer {
                     choice,
@@ -1048,6 +1100,7 @@ impl App {
         for action in actions {
             self.apply(&ctx, action);
         }
+        self.audition_frame(&ctx);
         self.transition.paint(&ctx);
 
         if self.first_frame.is_none() {
@@ -1084,6 +1137,8 @@ impl fastframe_shell::Resident for App {
     }
 
     fn window_gone(&mut self) {
+        // Nothing can be held under the pointer without a window.
+        self.end_audition();
         log::info!("window closed; playing on in the background");
         self.hidden = true;
         self.switch_window = false;

@@ -3,6 +3,7 @@
 //! Views read [`App`] and push [`Action`]s.
 
 mod account;
+pub(crate) mod audition;
 mod chrome;
 mod equalizer;
 mod lyrics;
@@ -34,6 +35,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let p = app.palette.clone();
     keyboard(app, ui, actions);
     account::publish(app, ui);
+    audition::publish(ui.ctx(), app.playback.audition.as_ref());
     if !app.queue.is_empty() {
         egui::Panel::bottom("player")
             .exact_size(PLAYER)

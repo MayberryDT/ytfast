@@ -2,7 +2,7 @@ use super::widgets::{font, icon_button, label, named, named_as};
 use crate::app::{Action, App};
 use crate::backend::Command;
 use crate::icons::Icon;
-use crate::model::Account;
+use crate::model::{Account, Mixes};
 use crate::theme::Palette;
 use egui::{RichText, Ui};
 use fastframe_fonts::Weight;
@@ -57,6 +57,28 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
                 Weight::Regular,
                 p.dim,
             );
+        }
+        let mut mixes = app.playback.mixes;
+        if named_as(
+            ui.checkbox(&mut mixes.on, "Blend songs on radios and mixes"),
+            egui::WidgetType::Checkbox,
+            "Blend songs on radios and mixes",
+        )
+        .on_hover_text("Albums and playlists stay gapless")
+        .changed()
+        {
+            actions.push(Action::Command(Command::Mixes(mixes)));
+        }
+        if mixes.on
+            && ui
+                .add(
+                    egui::Slider::new(&mut mixes.seconds, Mixes::SHORTEST..=Mixes::LONGEST)
+                        .suffix(" s")
+                        .text("Blend length"),
+                )
+                .changed()
+        {
+            actions.push(Action::Command(Command::Mixes(mixes)));
         }
         let equalizer = &app.playback.equalizer;
         let status = if equalizer.enabled {

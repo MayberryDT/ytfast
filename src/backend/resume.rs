@@ -1,5 +1,6 @@
 //! The session across launches, in `~/.cache/ytfast/session.json`: the
-//! queue (play order, list order and additions), the current song and its
+//! queue (play order, list order and additions, and whether it is a radio
+//! for Smooth mixes), the current song and its
 //! position, volume, shuffle, repeat and autoplay. It is saved on pause,
 //! track changes, queue changes and exit, and every ten seconds while
 //! playing. At launch it comes back paused, and the current song resolves
@@ -22,6 +23,12 @@ struct Saved {
     shuffle: bool,
     repeat: Repeat,
     autoplay: bool,
+    /// The queue is a radio or a mix (Smooth mixes blend its changes).
+    #[serde(default)]
+    radio: bool,
+    /// Play-order positions of the songs autoplay added.
+    #[serde(default)]
+    autoplayed: Vec<usize>,
 }
 
 /// How often the session is saved while only the position changes.
@@ -51,6 +58,14 @@ impl super::Worker {
             shuffle: self.state.shuffle,
             repeat: self.state.repeat,
             autoplay: self.state.autoplay,
+            radio: self.decks.radio,
+            autoplayed: (0..self.queue.len())
+                .filter(|&p| {
+                    self.queue
+                        .id(p)
+                        .is_some_and(|id| self.decks.autoplay.contains(&id))
+                })
+                .collect(),
         };
         let written = serde_json::to_vec(&saved)
             .map_err(std::io::Error::other)
@@ -81,6 +96,12 @@ impl super::Worker {
             && !queue.is_empty()
         {
             self.queue = queue;
+            self.decks.radio = saved.radio;
+            self.decks.autoplay = saved
+                .autoplayed
+                .iter()
+                .filter_map(|&p| self.queue.id(p))
+                .collect();
             self.pos = saved.index.filter(|&i| i < self.queue.len());
             self.state.index = self.pos;
             if let Some(track) = self.current().cloned() {
