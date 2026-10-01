@@ -2352,20 +2352,51 @@ fn restored_as_expected(app: &App) -> bool {
             .is_some_and(|p| (p - app.playback.position).abs() < 1.0)
 }
 
+/// Since when the song playing has been current, for [`advance_through`].
+static CURRENT_SINCE: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+
 /// Lets the queue play on: notes each song as it plays and seeks near its
-/// end so the next one follows (gapless, as queued in mpv).
+/// end so the next one follows (gapless, as queued in mpv). A song whose
+/// length mpv never reported can't be sought to its end; after 20 s it is
+/// skipped with Next, and `engine:advances` says so.
 fn advance_through(app: &mut App) {
     let mut played: Vec<String> =
         serde_json::from_value(probed("engine:played")).unwrap_or_default();
-    if let Value::String(id) = current_id(app)
-        && played.last() != Some(&id)
-    {
-        played.push(id);
+    let Value::String(id) = current_id(app) else {
+        return;
+    };
+    if played.last() != Some(&id) {
+        played.push(id.clone());
         probe("engine:played", json!(played));
     }
+    let since = {
+        let mut current = CURRENT_SINCE.lock().expect("current lock");
+        if current.as_ref().is_none_or(|(c, _)| *c != id) {
+            *current = Some((id.clone(), Instant::now()));
+        }
+        current
+            .as_ref()
+            .map_or(0.0, |(_, t)| t.elapsed().as_secs_f64())
+    };
     let pb = &app.playback;
-    if audible(app) && pb.duration > 10.0 && pb.position < pb.duration - 6.0 {
-        app.backend.send(Command::Seek(pb.duration - 4.0));
+    if !audible(app) {
+        return;
+    }
+    if pb.duration > 10.0 {
+        if pb.position < pb.duration - 6.0 {
+            probe_push(
+                "engine:advances",
+                json!({"from": id, "by": "end", "duration": pb.duration}),
+            );
+            app.backend.send(Command::Seek(pb.duration - 4.0));
+        }
+    } else if since > 20.0 {
+        probe_push(
+            "engine:advances",
+            json!({"from": id, "by": "next", "duration": pb.duration}),
+        );
+        CURRENT_SINCE.lock().expect("current lock").take();
+        app.backend.send(Command::Next);
     }
 }
 
@@ -2507,7 +2538,7 @@ fn engine() -> Vec<Step> {
         run("pick four songs from Home", |a| {
             let queued: std::collections::HashSet<String> = queue_ids(a).into_iter().collect();
             let mut extras: Vec<crate::model::Track> = Vec::new();
-            for track in a
+            let mut tracks: Vec<crate::model::Track> = a
                 .page_state(&View::Home.target())
                 .and_then(|s| s.page.as_ref())
                 .map(|p| {
@@ -2515,10 +2546,17 @@ fn engine() -> Vec<Step> {
                         .iter()
                         .flat_map(|s| &s.items)
                         .filter_map(|i| i.track.clone())
-                        .collect::<Vec<_>>()
+                        .collect()
                 })
-                .unwrap_or_default()
-            {
+                .unwrap_or_default();
+            // Songs of a known, ordinary length first: hour-long mixes take
+            // longer to seek through and hold the run up.
+            tracks.sort_by_key(|t| match t.duration {
+                Some(d) if d <= 420 => 0,
+                None => 1,
+                Some(_) => 2,
+            });
+            for track in tracks {
                 let fresh = !queued.contains(&track.video_id)
                     && !extras.iter().any(|t| t.video_id == track.video_id)
                     && !extras.iter().any(|t| t.title == track.title);
@@ -2570,6 +2608,7 @@ fn engine() -> Vec<Step> {
             played_after_edits().len() >= 4
         }),
         measure("played_order", |_| json!(played_after_edits())),
+        measure("advances", |_| probed("engine:advances")),
         wait("played in the order shown", 1.0, |_| {
             played_after_edits() == shown_after_edits()
         }),
@@ -2957,6 +2996,8 @@ pub struct Driver {
     drag: Option<(Pos2, Pos2, u32)>,
     /// When a polling step last refreshed.
     polled: Option<Instant>,
+    /// The controls named the frame before `frame`'s registry.
+    previous: Vec<(String, Rect)>,
 }
 
 impl Driver {
@@ -2979,6 +3020,7 @@ impl Driver {
             finished: false,
             drag: None,
             polled: None,
+            previous: Vec::new(),
         })
     }
 
@@ -3022,9 +3064,25 @@ impl Driver {
             app.quit(ctx);
             return;
         }
+        // Only controls drawn in the same place for two frames are pointed
+        // at: a popup or dialog lays itself out once off its final place
+        // (egui's sizing pass) before it shows, and a moving control would
+        // be missed.
+        let stable: Vec<(String, Rect)> = registry
+            .iter()
+            .filter(|(label, rect)| {
+                self.previous.iter().any(|(l, r)| {
+                    l == label
+                        && (r.min - rect.min).length() < 1.0
+                        && (r.max - rect.max).length() < 1.0
+                })
+            })
+            .cloned()
+            .collect();
+        self.previous = registry;
         // The steps are taken out while one runs, so it can log and advance.
         let steps = std::mem::take(&mut self.steps);
-        self.step(&steps[self.index], app, ctx, &registry);
+        self.step(&steps[self.index], app, ctx, &stable);
         self.steps = steps;
     }
 
