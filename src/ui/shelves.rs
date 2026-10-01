@@ -71,10 +71,13 @@ pub(super) fn shelf_view(
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if carousel {
-                    if icon_button(ui, Icon::ChevronRight, 18.0, p.text, p, "Next").clicked() {
+                    if icon_button(ui, Icon::ChevronRight, 18.0, p.text, p, "Scroll right")
+                        .clicked()
+                    {
                         nudge(ui, scroll_state, scroll_id, 1.0);
                     }
-                    if icon_button(ui, Icon::ChevronLeft, 18.0, p.text, p, "Previous").clicked() {
+                    if icon_button(ui, Icon::ChevronLeft, 18.0, p.text, p, "Scroll left").clicked()
+                    {
                         nudge(ui, scroll_state, scroll_id, -1.0);
                     }
                     ui.add_space(4.0);
