@@ -209,6 +209,9 @@ pub struct AccountState {
     /// When each id was last changed here.
     changed: HashMap<String, Instant>,
     pending: HashMap<u64, Pending>,
+    /// Changes to cached pages, applied again to every copy of an affected
+    /// page that arrives while they are in flight or recent.
+    overlays: Vec<Overlay>,
     next_op: u64,
 }
 
@@ -230,6 +233,13 @@ impl AccountState {
                 .get(id)
                 .is_none_or(|t| t.elapsed() > TRUST_LOCAL)
     }
+
+    /// Forgets page changes that YouTube Music has had time to list.
+    fn expire_overlays(&mut self) {
+        let pending = &self.pending;
+        self.overlays
+            .retain(|o| pending.contains_key(&o.op) || o.made.elapsed() <= TRUST_LOCAL);
+    }
 }
 
 struct Pending {
@@ -237,6 +247,9 @@ struct Pending {
     subject: String,
     /// "Couldn't like “Get Lucky”."
     failed: String,
+    /// What to say when YouTube Music answers that the song is already in
+    /// the playlist.
+    duplicate: Option<String>,
     undo: Undo,
 }
 
@@ -256,36 +269,52 @@ enum Undo {
         set: bool,
         before: Option<bool>,
     },
-    /// A placeholder card for a playlist being created.
-    Created {
+    /// The affected cached pages as they were before the change, by key.
+    Pages(Vec<(String, Page)>),
+}
+
+/// A change to cached pages that YouTube Music may not list yet. It is
+/// applied when made, and again to each copy of an affected page that
+/// arrives while the change is in flight or recent: a fetch that YouTube
+/// Music answered from the older state must not undo it on screen.
+/// Applying one twice changes nothing.
+#[derive(Clone, Debug)]
+enum PageEdit {
+    /// A Library card for a playlist being created (`id` once known).
+    Create {
         title: String,
+        thumbnail: Option<String>,
+        id: Option<String>,
     },
-    /// Rows appended to a playlist's pages, not yet confirmed.
-    Added {
+    /// Songs at the end of the playlist (with their entry ids once known).
+    Add {
         playlist_id: String,
-        video_ids: Vec<String>,
-        title: String,
-        playlist: String,
+        tracks: Vec<Track>,
     },
-    Removed {
+    Remove {
         playlist_id: String,
-        index: usize,
-        item: Box<Item>,
+        set_video_id: String,
     },
-    Moved {
+    /// An entry moved before another (to the end when `before` is `None`).
+    Move {
         playlist_id: String,
-        from: usize,
-        to: usize,
+        set_video_id: String,
+        before: Option<String>,
     },
     Details {
         playlist_id: String,
         title: String,
         description: Option<String>,
     },
-    Deleted {
-        index: usize,
-        item: Box<Item>,
+    Delete {
+        playlist_id: String,
     },
+}
+
+struct Overlay {
+    op: u64,
+    made: Instant,
+    edit: PageEdit,
 }
 
 fn quoted(title: &str) -> String {
@@ -323,30 +352,11 @@ fn row_for(track: &Track) -> Item {
             params: None,
         }),
         play: None,
-        track: Some(Track {
-            set_video_id: None,
-            ..track.clone()
-        }),
+        track: Some(track.clone()),
         index: None,
         stripe: None,
         editable: None,
     }
-}
-
-/// Where the songs of a playlist page are: (shelf, item) for every song row.
-fn song_rows(page: &Page) -> Vec<(usize, usize)> {
-    page.shelves
-        .iter()
-        .enumerate()
-        .flat_map(|(s, shelf)| {
-            shelf
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| i.track.is_some())
-                .map(move |(i, _)| (s, i))
-        })
-        .collect()
 }
 
 fn entry_of(item: &Item) -> Option<&str> {
@@ -356,6 +366,221 @@ fn entry_of(item: &Item) -> Option<&str> {
 fn is_card_of(item: &Item, playlist_id: &str) -> bool {
     item.editable.as_deref() == Some(playlist_id)
         || matches!(&item.target, Some(Target::Browse { id, .. }) if id.strip_prefix("VL") == Some(playlist_id))
+}
+
+/// A card added here for a playlist that YouTube Music doesn't list yet.
+fn is_placeholder(item: &Item, title: &str) -> bool {
+    item.title == title && item.target.is_none() && item.editable.is_none()
+}
+
+/// The playlist's own songs: its first untitled list. YouTube Music adds a
+/// "Suggestions" list after it.
+pub fn entries(page: &Page) -> Option<&Shelf> {
+    page.shelves
+        .iter()
+        .find(|s| s.style == ShelfStyle::List && s.title.is_empty())
+}
+
+fn entries_mut(page: &mut Page) -> &mut Shelf {
+    let at = page
+        .shelves
+        .iter()
+        .position(|s| s.style == ShelfStyle::List && s.title.is_empty());
+    let at = at.unwrap_or_else(|| {
+        page.shelves.insert(
+            0,
+            Shelf {
+                title: String::new(),
+                strapline: None,
+                style: ShelfStyle::List,
+                items: Vec::new(),
+                more: None,
+                continuation: None,
+            },
+        );
+        0
+    });
+    &mut page.shelves[at]
+}
+
+fn is_playlist_page(key: &str, page: &Page, playlist_id: &str) -> bool {
+    key == playlist_target(playlist_id).key()
+        || page
+            .header
+            .as_ref()
+            .is_some_and(|h| h.editable.as_deref() == Some(playlist_id))
+}
+
+impl PageEdit {
+    fn playlist(&self) -> Option<&str> {
+        match self {
+            PageEdit::Create { .. } => None,
+            PageEdit::Add { playlist_id, .. }
+            | PageEdit::Remove { playlist_id, .. }
+            | PageEdit::Move { playlist_id, .. }
+            | PageEdit::Details { playlist_id, .. }
+            | PageEdit::Delete { playlist_id } => Some(playlist_id),
+        }
+    }
+
+    /// Applies the change to the page cached under `key`, if it is one the
+    /// change affects.
+    fn apply(&self, key: &str, page: &mut Page) {
+        if key == library_target().key() {
+            self.apply_to_library(page);
+        }
+        if let Some(id) = self.playlist()
+            && is_playlist_page(key, page, id)
+        {
+            self.apply_to_playlist(page);
+        }
+    }
+
+    fn apply_to_library(&self, page: &mut Page) {
+        match self {
+            PageEdit::Create {
+                title,
+                thumbnail,
+                id,
+            } => {
+                let listed = page
+                    .shelves
+                    .iter()
+                    .flat_map(|s| &s.items)
+                    .any(|i| id.as_deref().is_some_and(|id| is_card_of(i, id)));
+                if listed {
+                    return;
+                }
+                if let Some(card) = page
+                    .shelves
+                    .iter_mut()
+                    .flat_map(|s| &mut s.items)
+                    .find(|i| is_placeholder(i, title))
+                {
+                    if let Some(id) = id {
+                        card.target = Some(playlist_target(id));
+                        card.editable = Some(id.clone());
+                    }
+                    return;
+                }
+                let card = Item {
+                    kind: ItemKind::Playlist,
+                    title: title.clone(),
+                    subtitle: vec![Run {
+                        text: "Playlist".into(),
+                        target: None,
+                    }],
+                    thumbnail: thumbnail.clone(),
+                    target: id.as_deref().map(playlist_target),
+                    play: None,
+                    track: None,
+                    index: None,
+                    stripe: None,
+                    editable: id.clone(),
+                };
+                match page.shelves.first_mut() {
+                    // YouTube Music lists a new playlist first among the
+                    // account's own, after the automatic ones.
+                    Some(shelf) => {
+                        let at = shelf
+                            .items
+                            .iter()
+                            .position(|i| i.editable.is_some())
+                            .unwrap_or(shelf.items.len().min(2));
+                        shelf.items.insert(at, card);
+                    }
+                    None => page.shelves.push(Shelf {
+                        title: String::new(),
+                        strapline: None,
+                        style: ShelfStyle::Grid,
+                        items: vec![card],
+                        more: None,
+                        continuation: None,
+                    }),
+                }
+            }
+            PageEdit::Details {
+                playlist_id, title, ..
+            } => {
+                let cards = page.shelves.iter_mut().flat_map(|s| &mut s.items);
+                for card in cards.filter(|c| is_card_of(c, playlist_id)) {
+                    card.title = title.clone();
+                }
+            }
+            PageEdit::Delete { playlist_id } => {
+                for shelf in &mut page.shelves {
+                    shelf.items.retain(|i| !is_card_of(i, playlist_id));
+                }
+            }
+            PageEdit::Add { .. } | PageEdit::Remove { .. } | PageEdit::Move { .. } => {}
+        }
+    }
+
+    fn apply_to_playlist(&self, page: &mut Page) {
+        match self {
+            PageEdit::Add { tracks, .. } => {
+                page.message = None;
+                let shelf = entries_mut(page);
+                for track in tracks {
+                    let row = shelf.items.iter_mut().find_map(|i| {
+                        i.track.as_mut().filter(|t| {
+                            t.video_id == track.video_id
+                                && (t.set_video_id.is_none()
+                                    || t.set_video_id == track.set_video_id)
+                        })
+                    });
+                    match row {
+                        Some(listed) => {
+                            if listed.set_video_id.is_none() {
+                                listed.set_video_id = track.set_video_id.clone();
+                            }
+                        }
+                        None => shelf.items.push(row_for(track)),
+                    }
+                }
+            }
+            PageEdit::Remove { set_video_id, .. } => {
+                for shelf in &mut page.shelves {
+                    shelf
+                        .items
+                        .retain(|i| entry_of(i) != Some(set_video_id.as_str()));
+                }
+            }
+            PageEdit::Move {
+                set_video_id,
+                before,
+                ..
+            } => {
+                let shelf = entries_mut(page);
+                let Some(from) = shelf
+                    .items
+                    .iter()
+                    .position(|i| entry_of(i) == Some(set_video_id.as_str()))
+                else {
+                    return;
+                };
+                let item = shelf.items.remove(from);
+                let to = match before {
+                    Some(before) => shelf
+                        .items
+                        .iter()
+                        .position(|i| entry_of(i) == Some(before.as_str())),
+                    None => Some(shelf.items.len()),
+                };
+                // The entry it went before is gone: leave it where it was.
+                shelf.items.insert(to.unwrap_or(from), item);
+            }
+            PageEdit::Details {
+                title, description, ..
+            } => {
+                if let Some(h) = page.header.as_mut() {
+                    h.title = title.clone();
+                    h.description = description.clone();
+                }
+            }
+            PageEdit::Create { .. } | PageEdit::Delete { .. } => {}
+        }
+    }
 }
 
 impl App {
@@ -369,33 +594,26 @@ impl App {
 
     /// The cached pages of a playlist (it may be open under more than one key).
     fn playlist_keys(&self, playlist_id: &str) -> Vec<String> {
-        let key = playlist_target(playlist_id).key();
         self.pages
             .iter()
             .filter(|(k, s)| {
-                **k == key
-                    || s.page
-                        .as_ref()
-                        .and_then(|p| p.header.as_ref())
-                        .is_some_and(|h| h.editable.as_deref() == Some(playlist_id))
+                s.page
+                    .as_ref()
+                    .is_some_and(|p| is_playlist_page(k, p, playlist_id))
             })
             .map(|(k, _)| k.clone())
             .collect()
     }
 
-    fn playlist_pages(&mut self, playlist_id: &str) -> Vec<&mut Page> {
-        let keys = self.playlist_keys(playlist_id);
+    fn playlist_pages(&self, playlist_id: &str) -> Vec<&Page> {
         self.pages
-            .iter_mut()
-            .filter(|(k, _)| keys.contains(k))
-            .filter_map(|(_, s)| s.page.as_mut())
+            .iter()
+            .filter_map(|(k, s)| {
+                s.page
+                    .as_ref()
+                    .filter(|p| is_playlist_page(k, p, playlist_id))
+            })
             .collect()
-    }
-
-    fn library_page(&mut self) -> Option<&mut Page> {
-        self.pages
-            .get_mut(&library_target().key())
-            .and_then(|s| s.page.as_mut())
     }
 
     /// The account's playlists that it can edit, from Library: (id, title).
@@ -420,23 +638,14 @@ impl App {
             .map(|(_, t)| t);
         from_library
             .or_else(|| {
-                self.playlist_keys(playlist_id).iter().find_map(|k| {
-                    Some(
-                        self.pages
-                            .get(k)?
-                            .page
-                            .as_ref()?
-                            .header
-                            .as_ref()?
-                            .title
-                            .clone(),
-                    )
-                })
+                self.playlist_pages(playlist_id)
+                    .iter()
+                    .find_map(|p| Some(p.header.as_ref()?.title.clone()))
             })
             .unwrap_or_else(|| "the playlist".into())
     }
 
-    fn send_edit(&mut self, edit: Edit, refresh: Vec<Target>, pending: Pending) {
+    fn send_edit(&mut self, edit: Edit, refresh: Vec<Target>, pending: Pending) -> u64 {
         self.account_state.next_op += 1;
         let op = self.account_state.next_op;
         self.account_state
@@ -445,6 +654,69 @@ impl App {
         self.account_state.pending.insert(op, pending);
         self.backend
             .send(Command::AccountEdit { op, edit, refresh });
+        op
+    }
+
+    /// Changes the cached pages at once and asks YouTube Music to make the
+    /// change; the pages as they were are kept for a rollback.
+    fn send_page_edit(
+        &mut self,
+        edit: Edit,
+        change: PageEdit,
+        refresh: Vec<Target>,
+        failed: String,
+        duplicate: Option<String>,
+    ) {
+        let mut keys = change
+            .playlist()
+            .map(|id| self.playlist_keys(id))
+            .unwrap_or_default();
+        keys.push(library_target().key());
+        let before = keys
+            .into_iter()
+            .filter_map(|k| {
+                let page = self.pages.get(&k)?.page.clone()?;
+                Some((k, page))
+            })
+            .collect();
+        for (key, state) in &mut self.pages {
+            if let Some(page) = state.page.as_mut() {
+                change.apply(key, page);
+            }
+        }
+        let subject = change.playlist().map_or_else(
+            || match &change {
+                PageEdit::Create { title, .. } => format!("new:{title}"),
+                _ => String::new(),
+            },
+            str::to_owned,
+        );
+        let op = self.send_edit(
+            edit,
+            refresh,
+            Pending {
+                subject,
+                failed,
+                duplicate,
+                undo: Undo::Pages(before),
+            },
+        );
+        self.account_state.overlays.push(Overlay {
+            op,
+            made: Instant::now(),
+            edit: change,
+        });
+    }
+
+    /// Applies the page changes still in force to the page cached under `key`.
+    fn apply_overlays(&mut self, key: &str) {
+        self.account_state.expire_overlays();
+        let Some(page) = self.pages.get_mut(key).and_then(|s| s.page.as_mut()) else {
+            return;
+        };
+        for overlay in &self.account_state.overlays {
+            overlay.edit.apply(key, page);
+        }
     }
 
     /// Likes the playing song, or removes its like (keyboard, command line, MPRIS).
@@ -495,6 +767,7 @@ impl App {
                     Pending {
                         subject: id.clone(),
                         failed: format!("Couldn't {verb} {}.", quoted(&track.title)),
+                        duplicate: None,
                         undo: Undo::Like {
                             video_id: id,
                             set: status,
@@ -524,6 +797,7 @@ impl App {
                     Pending {
                         subject: playlist_id.clone(),
                         failed,
+                        duplicate: None,
                         undo: Undo::Saved {
                             id: playlist_id,
                             set: save,
@@ -563,6 +837,7 @@ impl App {
                     Pending {
                         subject: channel_id.clone(),
                         failed,
+                        duplicate: None,
                         undo: Undo::Subscribed {
                             id: channel_id,
                             set: subscribe,
@@ -580,55 +855,20 @@ impl App {
                 if title.is_empty() {
                     return;
                 }
-                if let Some(page) = self.library_page() {
-                    let card = Item {
-                        kind: ItemKind::Playlist,
-                        title: title.clone(),
-                        subtitle: vec![Run {
-                            text: "Playlist".into(),
-                            target: None,
-                        }],
-                        thumbnail: tracks.first().and_then(|t| t.thumbnail.clone()),
-                        target: None,
-                        play: None,
-                        track: None,
-                        index: None,
-                        stripe: None,
-                        editable: None,
-                    };
-                    match page.shelves.first_mut() {
-                        // YouTube Music lists a new playlist first among the
-                        // account's own, after the automatic ones.
-                        Some(shelf) => {
-                            let at = shelf
-                                .items
-                                .iter()
-                                .position(|i| i.editable.is_some())
-                                .unwrap_or(shelf.items.len().min(2));
-                            shelf.items.insert(at, card);
-                        }
-                        None => page.shelves.push(Shelf {
-                            title: String::new(),
-                            strapline: None,
-                            style: ShelfStyle::Grid,
-                            items: vec![card],
-                            more: None,
-                            continuation: None,
-                        }),
-                    }
-                }
-                self.send_edit(
+                self.send_page_edit(
                     Edit::Create {
                         title: title.clone(),
                         description: description.trim().to_owned(),
                         video_ids: tracks.iter().map(|t| t.video_id.clone()).collect(),
                     },
-                    vec![library_target()],
-                    Pending {
-                        subject: format!("new:{title}"),
-                        failed: format!("Couldn't create {}.", quoted(&title)),
-                        undo: Undo::Created { title },
+                    PageEdit::Create {
+                        title: title.clone(),
+                        thumbnail: tracks.first().and_then(|t| t.thumbnail.clone()),
+                        id: None,
                     },
+                    vec![library_target()],
+                    format!("Couldn't create {}.", quoted(&title)),
+                    None,
                 );
             }
             AccountAction::Add {
@@ -639,68 +879,46 @@ impl App {
                 let Some(first) = tracks.first() else { return };
                 let song = first.title.clone();
                 // Already listed: say so without asking.
-                let listed = self.playlist_keys(&playlist_id).iter().any(|k| {
-                    self.pages
-                        .get(k)
-                        .and_then(|s| s.page.as_ref())
-                        .is_some_and(|p| {
-                            p.shelves.iter().flat_map(|s| &s.items).any(|i| {
-                                i.track.as_ref().is_some_and(|t| {
-                                    tracks.iter().any(|n| n.video_id == t.video_id)
-                                })
-                            })
+                let listed = self.playlist_pages(&playlist_id).iter().any(|p| {
+                    entries(p).is_some_and(|s| {
+                        s.items.iter().any(|i| {
+                            i.track
+                                .as_ref()
+                                .is_some_and(|t| tracks.iter().any(|n| n.video_id == t.video_id))
                         })
+                    })
                 });
+                let duplicate = format!("{} is already in {}.", quoted(&song), quoted(&playlist));
                 if listed {
-                    self.push_error(format!(
-                        "{} is already in {}.",
-                        quoted(&song),
-                        quoted(&playlist)
-                    ));
+                    self.push_error(duplicate);
                     return;
                 }
-                for page in self.playlist_pages(&playlist_id) {
-                    let rows: Vec<Item> = tracks.iter().map(row_for).collect();
-                    page.message = None;
-                    match page
-                        .shelves
-                        .iter_mut()
-                        .rev()
-                        .find(|s| s.style == ShelfStyle::List)
-                    {
-                        Some(shelf) => shelf.items.extend(rows),
-                        None => page.shelves.push(Shelf {
-                            title: String::new(),
-                            strapline: None,
-                            style: ShelfStyle::List,
-                            items: rows,
-                            more: None,
-                            continuation: None,
-                        }),
-                    }
-                }
-                let video_ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
                 let what = if tracks.len() == 1 {
                     quoted(&song)
                 } else {
                     format!("{} songs", tracks.len())
                 };
-                self.send_edit(
+                // Entry ids from another playlist mean nothing here; this
+                // playlist's come with YouTube Music's answer.
+                let tracks: Vec<Track> = tracks
+                    .into_iter()
+                    .map(|t| Track {
+                        set_video_id: None,
+                        ..t
+                    })
+                    .collect();
+                self.send_page_edit(
                     Edit::Add {
                         playlist_id: playlist_id.clone(),
-                        video_ids: video_ids.clone(),
+                        video_ids: tracks.iter().map(|t| t.video_id.clone()).collect(),
+                    },
+                    PageEdit::Add {
+                        playlist_id: playlist_id.clone(),
+                        tracks,
                     },
                     vec![playlist_target(&playlist_id), library_target()],
-                    Pending {
-                        subject: playlist_id.clone(),
-                        failed: format!("Couldn't add {what} to {}.", quoted(&playlist)),
-                        undo: Undo::Added {
-                            playlist_id,
-                            video_ids,
-                            title: song,
-                            playlist,
-                        },
-                    },
+                    format!("Couldn't add {what} to {}.", quoted(&playlist)),
+                    Some(duplicate),
                 );
             }
             AccountAction::Remove {
@@ -708,42 +926,33 @@ impl App {
                 set_video_id,
             } => {
                 let playlist = self.playlist_title(&playlist_id);
-                let mut removed = None;
-                for page in self.playlist_pages(&playlist_id) {
-                    for (s, i) in song_rows(page) {
-                        if entry_of(&page.shelves[s].items[i]) == Some(set_video_id.as_str()) {
-                            let item = page.shelves[s].items.remove(i);
-                            removed.get_or_insert((i, item));
-                            break;
-                        }
-                    }
-                }
-                let Some((index, item)) = removed else { return };
-                let video_id = item
-                    .track
-                    .as_ref()
-                    .map(|t| t.video_id.clone())
-                    .unwrap_or_default();
-                self.send_edit(
+                let Some(track) = self.playlist_pages(&playlist_id).iter().find_map(|p| {
+                    entries(p)?
+                        .items
+                        .iter()
+                        .find(|i| entry_of(i) == Some(set_video_id.as_str()))?
+                        .track
+                        .clone()
+                }) else {
+                    return;
+                };
+                self.send_page_edit(
                     Edit::Remove {
                         playlist_id: playlist_id.clone(),
-                        video_id,
+                        video_id: track.video_id.clone(),
+                        set_video_id: set_video_id.clone(),
+                    },
+                    PageEdit::Remove {
+                        playlist_id: playlist_id.clone(),
                         set_video_id,
                     },
                     vec![playlist_target(&playlist_id), library_target()],
-                    Pending {
-                        subject: playlist_id.clone(),
-                        failed: format!(
-                            "Couldn't remove {} from {}.",
-                            quoted(&item.title),
-                            quoted(&playlist)
-                        ),
-                        undo: Undo::Removed {
-                            playlist_id,
-                            index,
-                            item: Box::new(item),
-                        },
-                    },
+                    format!(
+                        "Couldn't remove {} from {}.",
+                        quoted(&track.title),
+                        quoted(&playlist)
+                    ),
+                    None,
                 );
             }
             AccountAction::Move {
@@ -755,77 +964,54 @@ impl App {
                     return;
                 }
                 let playlist = self.playlist_title(&playlist_id);
-                // (from, to, successor, title) from the first page holding both.
-                let mut moved: Option<(usize, usize, Option<String>, String)> = None;
-                let mut not_ready = false;
-                for page in self.playlist_pages(&playlist_id) {
-                    let Some(shelf) = page.shelves.iter_mut().find(|s| {
-                        s.items
+                // The order after the move, from a page that lists both.
+                let Some((title, successor)) =
+                    self.playlist_pages(&playlist_id).iter().find_map(|p| {
+                        let rows = &entries(p)?.items;
+                        let from = rows
                             .iter()
-                            .any(|i| entry_of(i) == Some(set_video_id.as_str()))
-                            && s.items.iter().any(|i| entry_of(i) == Some(onto.as_str()))
-                    }) else {
-                        continue;
-                    };
-                    let from = shelf
-                        .items
-                        .iter()
-                        .position(|i| entry_of(i) == Some(set_video_id.as_str()))
-                        .unwrap_or(0);
-                    let to = shelf
-                        .items
-                        .iter()
-                        .position(|i| entry_of(i) == Some(onto.as_str()))
-                        .unwrap_or(0);
-                    let item = shelf.items.remove(from);
-                    let title = item.title.clone();
-                    shelf.items.insert(to, item);
-                    let successor: Option<Option<String>> = shelf
-                        .items
-                        .get(to + 1)
-                        .map(|i| entry_of(i).map(str::to_owned));
-                    if matches!(successor, Some(None)) {
-                        // Just added, not yet listed by YouTube Music: put it back.
-                        let item = shelf.items.remove(to);
-                        shelf.items.insert(from, item);
-                        not_ready = true;
-                        break;
-                    }
-                    let before = successor.flatten();
-                    if moved.is_none() {
-                        moved = Some((from, to, before, title));
-                    }
-                }
-                if not_ready {
-                    self.push_error(format!(
-                        "Couldn't move that song yet; {} is still saving. Try again in a moment.",
-                        quoted(&playlist)
-                    ));
-                    return;
-                }
-                let Some((from, to, before, title)) = moved else {
+                            .position(|i| entry_of(i) == Some(set_video_id.as_str()))?;
+                        let to = rows
+                            .iter()
+                            .position(|i| entry_of(i) == Some(onto.as_str()))?;
+                        let mut order: Vec<&Item> = rows.iter().collect();
+                        let item = order.remove(from);
+                        order.insert(to, item);
+                        Some((
+                            item.title.clone(),
+                            order.get(to + 1).map(|i| entry_of(i).map(str::to_owned)),
+                        ))
+                    })
+                else {
                     return;
                 };
-                self.send_edit(
+                let before = match successor {
+                    // Just added, not yet listed by YouTube Music.
+                    Some(None) => {
+                        self.push_error(format!(
+                            "Couldn't move {} yet; {} is still saving. Try again in a moment.",
+                            quoted(&title),
+                            quoted(&playlist)
+                        ));
+                        return;
+                    }
+                    Some(Some(entry)) => Some(entry),
+                    None => None,
+                };
+                self.send_page_edit(
                     Edit::Move {
+                        playlist_id: playlist_id.clone(),
+                        set_video_id: set_video_id.clone(),
+                        before: before.clone(),
+                    },
+                    PageEdit::Move {
                         playlist_id: playlist_id.clone(),
                         set_video_id,
                         before,
                     },
                     vec![playlist_target(&playlist_id)],
-                    Pending {
-                        subject: playlist_id.clone(),
-                        failed: format!(
-                            "Couldn't move {} in {}.",
-                            quoted(&title),
-                            quoted(&playlist)
-                        ),
-                        undo: Undo::Moved {
-                            playlist_id,
-                            from,
-                            to,
-                        },
-                    },
+                    format!("Couldn't move {} in {}.", quoted(&title), quoted(&playlist)),
+                    None,
                 );
             }
             AccountAction::Details {
@@ -839,26 +1025,16 @@ impl App {
                     return;
                 }
                 let old_title = self.playlist_title(&playlist_id);
-                let mut old_description = None;
-                for page in self.playlist_pages(&playlist_id) {
-                    if let Some(h) = page.header.as_mut() {
-                        old_description = h.description.clone();
-                        h.title = title.clone();
-                        h.description = Some(description.clone()).filter(|d| !d.is_empty());
-                    }
-                }
-                if let Some(page) = self.library_page() {
-                    for item in page.shelves.iter_mut().flat_map(|s| &mut s.items) {
-                        if is_card_of(item, &playlist_id) {
-                            item.title = title.clone();
-                        }
-                    }
-                }
+                let old_description = self
+                    .playlist_pages(&playlist_id)
+                    .iter()
+                    .find_map(|p| p.header.as_ref())
+                    .and_then(|h| h.description.clone())
+                    .unwrap_or_default();
                 let edit = Edit::Details {
                     playlist_id: playlist_id.clone(),
                     title: (title != old_title).then(|| title.clone()),
-                    description: (old_description.as_deref().unwrap_or("") != description)
-                        .then_some(description),
+                    description: (old_description != description).then(|| description.clone()),
                 };
                 if matches!(
                     &edit,
@@ -870,33 +1046,20 @@ impl App {
                 ) {
                     return;
                 }
-                self.send_edit(
+                self.send_page_edit(
                     edit,
-                    vec![playlist_target(&playlist_id), library_target()],
-                    Pending {
-                        subject: playlist_id.clone(),
-                        failed: format!("Couldn't save the changes to {}.", quoted(&old_title)),
-                        undo: Undo::Details {
-                            playlist_id,
-                            title: old_title,
-                            description: old_description,
-                        },
+                    PageEdit::Details {
+                        playlist_id: playlist_id.clone(),
+                        title,
+                        description: Some(description).filter(|d| !d.is_empty()),
                     },
+                    vec![playlist_target(&playlist_id), library_target()],
+                    format!("Couldn't save the changes to {}.", quoted(&old_title)),
+                    None,
                 );
             }
             AccountAction::Delete { playlist_id } => {
                 let title = self.playlist_title(&playlist_id);
-                let mut removed = None;
-                if let Some(page) = self.library_page() {
-                    for shelf in &mut page.shelves {
-                        if let Some(i) =
-                            shelf.items.iter().position(|i| is_card_of(i, &playlist_id))
-                        {
-                            removed = Some((i, shelf.items.remove(i)));
-                            break;
-                        }
-                    }
-                }
                 // Leave the deleted playlist's page.
                 let showing = matches!(&self.view, View::Page(t) if self.playlist_keys(&playlist_id).contains(&t.key()));
                 if showing {
@@ -907,36 +1070,14 @@ impl App {
                     self.view = back;
                     self.ensure_page(self.view.target(), false);
                 }
-                let (index, item) = removed.unwrap_or_else(|| {
-                    (
-                        0,
-                        Item {
-                            kind: ItemKind::Playlist,
-                            title: title.clone(),
-                            subtitle: Vec::new(),
-                            thumbnail: None,
-                            target: Some(playlist_target(&playlist_id)),
-                            play: None,
-                            track: None,
-                            index: None,
-                            stripe: None,
-                            editable: Some(playlist_id.clone()),
-                        },
-                    )
-                });
-                self.send_edit(
+                self.send_page_edit(
                     Edit::Delete {
                         playlist_id: playlist_id.clone(),
                     },
+                    PageEdit::Delete { playlist_id },
                     vec![library_target()],
-                    Pending {
-                        subject: playlist_id,
-                        failed: format!("Couldn't delete {}.", quoted(&title)),
-                        undo: Undo::Deleted {
-                            index,
-                            item: Box::new(item),
-                        },
-                    },
+                    format!("Couldn't delete {}.", quoted(&title)),
+                    None,
                 );
             }
         }
@@ -948,17 +1089,10 @@ impl App {
             return;
         };
         match result {
-            Ok(done) => self.confirm(pending, done),
+            Ok(done) => self.confirm(op, done),
             Err(failure) => {
-                let message = match (&failure, &pending.undo) {
-                    (
-                        Failure::AlreadyInPlaylist,
-                        Undo::Added {
-                            title, playlist, ..
-                        },
-                    ) => {
-                        format!("{} is already in {}.", quoted(title), quoted(playlist))
-                    }
+                let message = match (&failure, &pending.duplicate) {
+                    (Failure::AlreadyInPlaylist, Some(duplicate)) => duplicate.clone(),
                     (Failure::Offline, _) => {
                         format!("{} Check the connection and try again.", pending.failed)
                     }
@@ -970,48 +1104,47 @@ impl App {
                         log::warn!("account edit refused: {detail}");
                         format!("{} YouTube Music didn't accept it.", pending.failed)
                     }
-                    (Failure::AlreadyInPlaylist, _) => {
+                    (Failure::AlreadyInPlaylist, None) => {
                         format!("{} YouTube Music didn't accept it.", pending.failed)
                     }
                 };
                 // Let fetched pages speak for this id again.
                 self.account_state.changed.remove(&pending.subject);
+                self.account_state.overlays.retain(|o| o.op != op);
                 self.roll_back(pending.undo);
                 self.push_error(message);
             }
         }
     }
 
-    fn confirm(&mut self, pending: Pending, done: Done) {
-        match (pending.undo, done) {
-            (Undo::Created { title }, Done::Created(id)) => {
-                if let Some(page) = self.library_page() {
-                    for item in page.shelves.iter_mut().flat_map(|s| &mut s.items) {
-                        if item.title == title && item.target.is_none() && item.editable.is_none() {
-                            item.target = Some(playlist_target(&id));
-                            item.editable = Some(id.clone());
-                            break;
-                        }
-                    }
-                }
-                self.account_state.created = Some((title, id));
+    /// Records what YouTube Music returned for a change in force: a new
+    /// playlist's id, new entries' ids.
+    fn confirm(&mut self, op: u64, done: Done) {
+        let Some(overlay) = self.account_state.overlays.iter_mut().find(|o| o.op == op) else {
+            return;
+        };
+        match (&mut overlay.edit, done) {
+            (PageEdit::Create { title, id, .. }, Done::Created(new)) => {
+                *id = Some(new.clone());
+                self.account_state.created = Some((title.clone(), new));
             }
-            (Undo::Added { playlist_id, .. }, Done::Added(entries)) => {
-                for page in self.playlist_pages(&playlist_id) {
-                    for (video_id, entry) in &entries {
-                        if let Some(track) = page
-                            .shelves
-                            .iter_mut()
-                            .flat_map(|s| &mut s.items)
-                            .filter_map(|i| i.track.as_mut())
-                            .find(|t| &t.video_id == video_id && t.set_video_id.is_none())
-                        {
-                            track.set_video_id = Some(entry.clone());
-                        }
+            (PageEdit::Add { tracks, .. }, Done::Added(added)) => {
+                for (video_id, entry) in added {
+                    if let Some(t) = tracks
+                        .iter_mut()
+                        .find(|t| t.video_id == video_id && t.set_video_id.is_none())
+                    {
+                        t.set_video_id = Some(entry);
                     }
                 }
             }
-            _ => {}
+            _ => return,
+        }
+        let change = overlay.edit.clone();
+        for (key, state) in &mut self.pages {
+            if let Some(page) = state.page.as_mut() {
+                change.apply(key, page);
+            }
         }
     }
 
@@ -1049,88 +1182,17 @@ impl App {
                     };
                 }
             }
-            Undo::Created { title } => {
-                if let Some(page) = self.library_page() {
-                    for shelf in &mut page.shelves {
-                        shelf.items.retain(|i| {
-                            !(i.title == title && i.target.is_none() && i.editable.is_none())
-                        });
-                    }
-                }
-            }
-            Undo::Added {
-                playlist_id,
-                video_ids,
-                ..
-            } => {
-                for page in self.playlist_pages(&playlist_id) {
-                    for shelf in &mut page.shelves {
-                        shelf.items.retain(|i| {
-                            !i.track.as_ref().is_some_and(|t| {
-                                t.set_video_id.is_none() && video_ids.contains(&t.video_id)
-                            })
-                        });
-                    }
-                }
-            }
-            Undo::Removed {
-                playlist_id,
-                index,
-                item,
-            } => {
-                for page in self.playlist_pages(&playlist_id) {
-                    if let Some(shelf) = page
-                        .shelves
-                        .iter_mut()
-                        .rev()
-                        .find(|s| s.style == ShelfStyle::List)
-                    {
-                        let at = index.min(shelf.items.len());
-                        shelf.items.insert(at, (*item).clone());
-                    }
-                }
-            }
-            Undo::Moved {
-                playlist_id,
-                from,
-                to,
-            } => {
-                for page in self.playlist_pages(&playlist_id) {
-                    if let Some(shelf) = page
-                        .shelves
-                        .iter_mut()
-                        .find(|s| s.items.iter().any(|i| entry_of(i).is_some()))
-                        && to < shelf.items.len()
-                        && from < shelf.items.len()
-                    {
-                        let item = shelf.items.remove(to);
-                        shelf.items.insert(from, item);
-                    }
-                }
-            }
-            Undo::Details {
-                playlist_id,
-                title,
-                description,
-            } => {
-                for page in self.playlist_pages(&playlist_id) {
-                    if let Some(h) = page.header.as_mut() {
-                        h.title = title.clone();
-                        h.description = description.clone();
-                    }
-                }
-                if let Some(page) = self.library_page() {
-                    for item in page.shelves.iter_mut().flat_map(|s| &mut s.items) {
-                        if is_card_of(item, &playlist_id) {
-                            item.title = title.clone();
-                        }
-                    }
-                }
-            }
-            Undo::Deleted { index, item } => {
-                if let Some(shelf) = self.library_page().and_then(|p| p.shelves.first_mut()) {
-                    let at = index.min(shelf.items.len());
-                    shelf.items.insert(at, *item);
+            // The pages as they were, with the other changes in force on
+            // top; then YouTube Music's own copy.
+            Undo::Pages(before) => {
+                for (key, page) in before {
+                    let Some(state) = self.pages.get_mut(&key) else {
+                        continue;
+                    };
+                    state.page = Some(page);
+                    let target = state.target.clone();
+                    self.apply_overlays(&key);
+                    self.ensure_page(target, true);
                 }
             }
         }
@@ -1156,9 +1218,14 @@ impl App {
         }
     }
 
-    /// A page arrived fresh from YouTube Music: what it says about likes,
+    /// A copy of a page arrived (saved or fresh). The page changes still in
+    /// force are applied to it; and what a fresh copy says about likes,
     /// library and subscriptions replaces the app's older marks.
-    pub(crate) fn account_page_fresh(&mut self, key: &str) {
+    pub(crate) fn account_page_arrived(&mut self, key: &str, cached: bool) {
+        self.apply_overlays(key);
+        if cached {
+            return;
+        }
         let Some(page) = self.pages.get(key).and_then(|s| s.page.as_ref()) else {
             return;
         };

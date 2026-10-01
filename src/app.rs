@@ -469,8 +469,8 @@ impl App {
                         state.error = Some(error);
                     }
                 }
-                if !cached && self.pages.get(&key).is_some_and(|s| s.error.is_none()) {
-                    self.account_page_fresh(&key);
+                if self.pages.get(&key).is_some_and(|s| s.error.is_none()) {
+                    self.account_page_arrived(&key, cached);
                 }
             }
             Event::More {
