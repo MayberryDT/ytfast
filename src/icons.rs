@@ -35,5 +35,14 @@ fastframe_icons::icons! {
         Settings => lucide "settings",
         MiniPlayer => lucide "minimize-2",
         FullPlayer => lucide "maximize-2",
+        ThumbsUp => "thumbs-up",
+        ThumbsUpFilled => "thumbs-up-filled",
+        ThumbsDown => "thumbs-down",
+        ThumbsDownFilled => "thumbs-down-filled",
+        AddToPlaylist => "list-plus",
+        Plus => lucide "plus",
+        Check => lucide "check",
+        Pencil => lucide "pencil",
+        Trash => lucide "trash-2",
     }
 }

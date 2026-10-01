@@ -1,5 +1,6 @@
 //! ytfast: a native YouTube Music client. See docs/SPEC.md.
 
+pub mod account;
 pub mod app;
 pub mod auth;
 pub mod backend;

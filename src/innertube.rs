@@ -276,6 +276,110 @@ impl Client {
     }
 }
 
+/// How YouTube Music answered a playlist edit: done (with the response), or
+/// refused with its own message ("This track is already in the playlist").
+pub enum Edited {
+    Done(Value),
+    Refused(String),
+}
+
+/// Writes to the signed-in account, as music.youtube.com makes them (shapes
+/// verified on 2026-10-01, docs/integration.md § Verified facts). A refused
+/// write answers with an HTTP error (404 for unknown ids).
+impl Client {
+    /// Rates a song: `like/like`, `like/dislike` or `like/removelike`.
+    pub async fn rate(&self, video_id: &str, status: crate::model::LikeStatus) -> Result<()> {
+        use crate::model::LikeStatus;
+        let endpoint = match status {
+            LikeStatus::Like => "like/like",
+            LikeStatus::Dislike => "like/dislike",
+            LikeStatus::Indifferent => "like/removelike",
+        };
+        self.call(endpoint, json!({ "target": { "videoId": video_id } }))
+            .await
+            .map(drop)
+    }
+
+    /// Saves an album (by its `OLAK5uy_…` audio playlist) or a playlist to
+    /// the library, or removes it.
+    pub async fn save_to_library(&self, playlist_id: &str, save: bool) -> Result<()> {
+        let endpoint = if save { "like/like" } else { "like/removelike" };
+        self.call(endpoint, json!({ "target": { "playlistId": playlist_id } }))
+            .await
+            .map(drop)
+    }
+
+    pub async fn subscribe(&self, channel_id: &str, subscribe: bool) -> Result<()> {
+        let endpoint = if subscribe {
+            "subscription/subscribe"
+        } else {
+            "subscription/unsubscribe"
+        };
+        self.call(endpoint, json!({ "channelIds": [channel_id] }))
+            .await
+            .map(drop)
+    }
+
+    /// Creates a private playlist and returns its id.
+    pub async fn create_playlist(
+        &self,
+        title: &str,
+        description: &str,
+        video_ids: &[String],
+    ) -> Result<String> {
+        let mut body =
+            json!({ "title": title, "description": description, "privacyStatus": "PRIVATE" });
+        if !video_ids.is_empty() {
+            body["videoIds"] = json!(video_ids);
+        }
+        let value = self.call("playlist/create", body).await?;
+        value
+            .get("playlistId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| ApiError::Invalid("no playlist id".into()))
+    }
+
+    /// `browse/edit_playlist` with `actions` (`ACTION_ADD_VIDEO`,
+    /// `ACTION_REMOVE_VIDEO`, `ACTION_MOVE_VIDEO_BEFORE`,
+    /// `ACTION_SET_PLAYLIST_NAME`, `ACTION_SET_PLAYLIST_DESCRIPTION`).
+    pub async fn edit_playlist(&self, playlist_id: &str, actions: Vec<Value>) -> Result<Edited> {
+        let value = self
+            .call(
+                "browse/edit_playlist",
+                json!({ "playlistId": playlist_id, "actions": actions }),
+            )
+            .await?;
+        if value.get("status").and_then(Value::as_str) == Some("STATUS_SUCCEEDED") {
+            return Ok(Edited::Done(value));
+        }
+        let message = crate::parse::find(&value, "responseText")
+            .or_else(|| crate::parse::find(&value, "successResponseText"))
+            .map(|t| crate::parse::text(Some(t)))
+            .unwrap_or_default();
+        Ok(Edited::Refused(message))
+    }
+
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.call("playlist/delete", json!({ "playlistId": playlist_id }))
+            .await
+            .map(drop)
+    }
+
+    /// The account's rating of a song, from a fresh `next` request.
+    pub async fn like_status(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<(String, crate::model::LikeStatus)>> {
+        let target = Target::Watch {
+            video_id: Some(video_id.to_owned()),
+            playlist_id: None,
+            params: None,
+        };
+        Ok(crate::parse::watch_next(&self.next(&target).await?).like)
+    }
+}
+
 fn offline(error: reqwest::Error) -> ApiError {
     ApiError::Offline(if error.is_timeout() {
         "timed out".into()

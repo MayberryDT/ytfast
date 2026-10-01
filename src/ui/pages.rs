@@ -91,6 +91,7 @@ fn library_tabs(ui: &mut Ui, current: LibraryTab, p: &Palette, actions: &mut Vec
             }
             ui.add_space(4.0);
         }
+        super::account::library_actions(ui, current, p, actions);
     });
 }
 
@@ -386,6 +387,8 @@ fn page_header(ui: &mut Ui, h: &Header, page: &Page, p: &Palette, actions: &mut 
                 {
                     actions.push(Action::Activate(radio.clone()));
                 }
+                ui.add_space(8.0);
+                super::account::header_actions(ui, h, p, actions);
             });
         });
     });

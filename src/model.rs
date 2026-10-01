@@ -89,6 +89,9 @@ pub struct Item {
     pub index: Option<String>,
     /// A mood button's stripe colour from YouTube Music (content, not chrome).
     pub stripe: Option<u32>,
+    /// For a playlist card: the playlist's id, when the account can edit it.
+    #[serde(default)]
+    pub editable: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +133,30 @@ pub struct Header {
     pub play: Option<Target>,
     pub shuffle: Option<Target>,
     pub radio: Option<Target>,
+    /// Albums and other people's playlists: saving to the library.
+    #[serde(default)]
+    pub library: Option<LibraryToggle>,
+    /// Artists: the channel to subscribe to.
+    #[serde(default)]
+    pub subscription: Option<Subscription>,
+    /// The account's own playlist: its id, for editing.
+    #[serde(default)]
+    pub editable: Option<String>,
+}
+
+/// Whether an album or playlist is in the library, and the id that saves it
+/// (an album's is its audio playlist, `OLAK5uy_…`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LibraryToggle {
+    pub playlist_id: String,
+    pub saved: bool,
+}
+
+/// An artist's channel and whether the account is subscribed to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Subscription {
+    pub channel_id: String,
+    pub subscribed: bool,
 }
 
 /// A filter chip above a page (search types, library sections, home moods).
@@ -167,6 +194,22 @@ pub struct Track {
     pub album: Option<Run>,
     pub thumbnail: Option<String>,
     pub duration: Option<u32>,
+    /// The account's rating, where the response gave it (playlist, album and
+    /// library rows).
+    #[serde(default)]
+    pub like: Option<LikeStatus>,
+    /// This entry's id in its playlist (`playlistSetVideoId`), for removing
+    /// and moving it.
+    #[serde(default)]
+    pub set_video_id: Option<String>,
+}
+
+/// A song's rating on the account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LikeStatus {
+    Like,
+    Dislike,
+    Indifferent,
 }
 
 impl Track {
@@ -190,6 +233,8 @@ pub struct WatchNext {
     pub radio: Option<Target>,
     /// More queue items.
     pub continuation: Option<String>,
+    /// The requested song and its rating on the account.
+    pub like: Option<(String, LikeStatus)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -335,6 +335,9 @@ impl super::Worker {
                 }
                 self.state.lyrics = info.lyrics;
                 self.state.related = info.related;
+                if let Some(like) = info.like {
+                    self.sink.send(Event::Likes(vec![like]));
+                }
                 self.emit(true);
             }
             Internal::Queue { epoch, result } => {

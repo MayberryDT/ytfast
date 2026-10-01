@@ -161,6 +161,10 @@ pub enum Action {
     MiniPlayer(bool),
     /// Settings: song-change notifications on or off.
     Notifications(bool),
+    /// Like the playing song, or remove its like.
+    ToggleLikeCurrent,
+    /// Likes, library, subscriptions and playlists (see `crate::account`).
+    Account(crate::account::AccountAction),
 }
 
 pub struct App {
@@ -232,6 +236,8 @@ pub struct App {
     pub e2e: Option<crate::e2e::Driver>,
     /// The desktop's palette has been applied once; later changes animate.
     themed: bool,
+    /// Likes, library and subscription marks, changes in flight, dialogs.
+    pub account_state: crate::account::AccountState,
 }
 
 impl App {
@@ -304,6 +310,7 @@ impl App {
             scroll_to_top: false,
             started,
             first_frame: None,
+            account_state: Default::default(),
             #[cfg(feature = "e2e")]
             e2e: crate::e2e::Driver::from_env(),
             themed: false,
@@ -431,6 +438,9 @@ impl App {
                         state.error = Some(error);
                     }
                 }
+                if !cached && self.pages.get(&key).is_some_and(|s| s.error.is_none()) {
+                    self.account_page_fresh(&key);
+                }
             }
             Event::More {
                 key,
@@ -526,6 +536,9 @@ impl App {
                 self.profiles = list;
                 self.profile = current;
             }
+            Event::AccountEdited { op, result } => self.account_edited(op, result),
+            Event::Likes(likes) => self.account_likes(likes),
+            Event::AccountRefresh(targets) => self.account_refresh(targets),
         }
     }
 
@@ -686,6 +699,8 @@ impl App {
                 self.desktop.notifications.store(on, Ordering::Relaxed);
                 self.backend.send(Command::Notifications(on));
             }
+            Action::ToggleLikeCurrent => self.toggle_like_current(),
+            Action::Account(action) => self.account_action(action),
         }
     }
 
@@ -752,10 +767,7 @@ impl App {
                 Request::Show => self.show(ctx),
                 Request::Quit => self.quit(ctx),
                 Request::Open(link) => self.open_link(ctx, &link),
-                Request::Like => {
-                    // integrator: route to Action::ToggleLikeCurrent
-                    log::info!("like asked for from outside the window (not wired yet)");
-                }
+                Request::Like => self.toggle_like_current(),
                 Request::ReloadThemes => self.reload_themes = true,
             }
         }

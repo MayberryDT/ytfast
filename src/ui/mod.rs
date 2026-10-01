@@ -2,6 +2,7 @@
 //! search bar on top, the page in the middle and the player bar below.
 //! Views read [`App`] and push [`Action`]s.
 
+mod account;
 mod chrome;
 mod lyrics;
 pub mod mini;
@@ -30,6 +31,7 @@ const GAP: f32 = 16.0;
 pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let p = app.palette.clone();
     keyboard(app, ui, actions);
+    account::publish(app, ui);
     if !app.queue.is_empty() {
         egui::Panel::bottom("player")
             .exact_size(PLAYER)
@@ -70,6 +72,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         }
         errors(app, ui, &p, actions);
     });
+    account::dialogs(app, ui, &p, actions);
 }
 
 fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {

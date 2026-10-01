@@ -72,6 +72,7 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         )));
         runs_line(&mut centered, &line, 15.0, p, actions);
         below.add_space(24.0);
+        super::account::now_playing_controls(&mut below, track, p, actions);
         if let Some(format) = &app.playback.format {
             label(&mut below, format, 12.0, Weight::Regular, p.dim);
         }

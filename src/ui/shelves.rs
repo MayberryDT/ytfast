@@ -328,8 +328,10 @@ pub(super) fn row(
     actions: &mut Vec<Action>,
 ) {
     let height = 56.0;
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), height),
+        super::account::row_sense(ui, item),
+    );
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), p.surface_hover);
@@ -377,7 +379,9 @@ pub(super) fn row(
         .as_ref()
         .and_then(|t| t.duration)
         .map(|d| format_time(f64::from(d)));
-    let right = rect.right() - if duration.is_some() { 72.0 } else { 16.0 };
+    let right = rect.right()
+        - if duration.is_some() { 72.0 } else { 16.0 }
+        - super::account::row_reserve(ui, item);
     let text_rect = Rect::from_min_max(
         pos2(left, rect.top() + 8.0),
         pos2(right, rect.bottom() - 6.0),
@@ -443,6 +447,7 @@ pub(super) fn row(
             p.secondary,
         );
     }
+    super::account::row_controls(ui, rect, &response, item, p, actions);
     // Links inside the row take their own clicks; the rest of the row plays/opens.
     let response = named(response, &item.title);
     if let (true, Some(track)) = (resting(ui, &response), &item.track) {
