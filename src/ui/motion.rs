@@ -141,6 +141,20 @@ pub fn clear_origin(ctx: &Context, site: &str) {
     });
 }
 
+/// The cover in flight that no place has taken yet, if any: a page still
+/// loading can offer it a place to land straight away.
+pub fn unclaimed(ctx: &Context) -> Option<String> {
+    let flight = ctx.data(|d| d.get_temp::<Flight>(flight_id()))?;
+    let now = ctx.input(|i| i.time);
+    (flight.claim.is_none() && now - flight.launched <= UNCLAIMED).then_some(flight.url)
+}
+
+/// The url of the cover landing at `site` right now.
+pub fn landing_at(ctx: &Context, site: Id) -> Option<String> {
+    let flight = ctx.data(|d| d.get_temp::<Flight>(flight_id()))?;
+    (flight.claim.map(|(owner, _)| owner) == Some(site)).then_some(flight.url)
+}
+
 /// Called where a cover is about to be drawn at `dest`. When a cover with
 /// this `url` is in flight and this place claims it, the flight is painted
 /// above everything and `true` comes back: draw only the empty frame there.
@@ -176,28 +190,31 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
     let rect = lerp_rect(flight.from, dest, k);
     let radius = flight.from_radius + (radius - flight.from_radius) * k.clamp(0.0, 1.0);
     let corner = CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8);
-    egui::Area::new(Id::new("ytfast-flying-cover-layer"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(pos2(0.0, 0.0))
-        .constrain(false)
-        .interactable(false)
-        .show(ctx, |ui| {
-            // A shadow that is strongest mid-flight: the cover lifts and sets down.
-            let height = (k * (1.0 - k)).max(0.0) * 4.0;
-            if height > 0.01 {
-                let shadow = egui::epaint::Shadow {
-                    offset: [0, (10.0 * height) as i8],
-                    blur: (28.0 * height) as u8,
-                    spread: 0,
-                    color: ui.visuals().window_shadow.color,
-                };
-                ui.painter().add(shadow.as_shape(rect, corner));
-            }
-            egui::Image::new(url.to_owned())
-                .corner_radius(corner)
-                .show_loading_spinner(false)
-                .paint_at(ui, rect);
-        });
+    // A root Ui on a foreground layer spanning the window: the flight crosses
+    // panels, so it can't be clipped to the place that claimed it.
+    let layer = egui::LayerId::new(egui::Order::Foreground, Id::new("ytfast-flying-cover"));
+    let over = Ui::new(
+        ctx.clone(),
+        Id::new("ytfast-flying-cover-ui"),
+        egui::UiBuilder::new()
+            .layer_id(layer)
+            .max_rect(ctx.content_rect()),
+    );
+    // A shadow that is strongest mid-flight: the cover lifts and sets down.
+    let height = (k * (1.0 - k)).max(0.0) * 4.0;
+    if height > 0.01 {
+        let shadow = egui::epaint::Shadow {
+            offset: [0, (10.0 * height) as i8],
+            blur: (28.0 * height) as u8,
+            spread: 0,
+            color: over.visuals().window_shadow.color,
+        };
+        over.painter().add(shadow.as_shape(rect, corner));
+    }
+    egui::Image::new(url.to_owned())
+        .corner_radius(corner)
+        .show_loading_spinner(false)
+        .paint_at(&over, rect);
     ctx.request_repaint();
     true
 }

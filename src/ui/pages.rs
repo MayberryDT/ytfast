@@ -99,6 +99,14 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
         if let Some(error) = &state.error {
             notice(ui, "Can't load this page", error, Some(key), p, actions);
         } else {
+            // A cover on its way here lands in the header's place at once;
+            // the real header takes it over when the page arrives.
+            let site = egui::Id::new("page-header-cover");
+            let flying = motion::landing_at(ui.ctx(), site).or_else(|| motion::unclaimed(ui.ctx()));
+            if let (Target::Browse { .. }, Some(url)) = (&state.target, flying) {
+                header_skeleton(ui, site, &url, p);
+                ui.add_space(28.0);
+            }
             skeleton(ui, p);
         }
         return;
@@ -169,6 +177,25 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
     if state.more_loading.contains(&None) {
         skeleton_shelf(ui, p);
     }
+}
+
+/// The header's shape while its page loads, holding the cover that was clicked.
+fn header_skeleton(ui: &mut Ui, site: egui::Id, url: &str, p: &Palette) {
+    let pulse = (ui.input(|i| i.time) * 2.0).sin() as f32 * 0.5 + 0.5;
+    let fill = p.surface.lerp_to_gamma(p.surface_hover, pulse);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(232.0), Sense::hover());
+        landing_cover(ui, site, rect, Some(url), false, 8, p);
+        ui.add_space(28.0);
+        ui.vertical(|ui| {
+            ui.add_space(14.0);
+            for width in [360.0, 220.0, 160.0] {
+                let (bar, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                ui.painter().rect_filled(bar, CornerRadius::same(5), fill);
+                ui.add_space(12.0);
+            }
+        });
+    });
 }
 
 fn notice(
