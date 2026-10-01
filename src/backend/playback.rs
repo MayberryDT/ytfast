@@ -658,6 +658,15 @@ impl super::Worker {
             .and_then(|t| t.duration)
             .map(f64::from)
             .unwrap_or(0.0);
+        // When the prefetched file opens at once, mpv reports its `duration`
+        // in the same batch as, and before, the change of file (observed
+        // order), where it was taken as the old song's: ask for it again.
+        if let Some(mpv) = &self.mpv
+            && let Ok(duration) = mpv.get("duration").await
+            && let Some(duration) = duration.as_f64()
+        {
+            self.state.duration = duration;
+        }
         self.state.format = Some(resolver::describe(next.itag));
         self.state.gain = next.gain;
         self.state.lyrics = None;
