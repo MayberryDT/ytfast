@@ -45,7 +45,13 @@ systemd-run --user --wait --collect --pipe -q -p MemoryHigh=5G -p MemoryMax=6G \
 systemctl --user stop ytfast-app 2>/dev/null || true
 pkill -x ytfast 2>/dev/null && sleep 1 || true
 
-set -- -E YTFAST_E2E_DIR="$dir" -E YTFAST_E2E_SCENARIO="$scenario" -E RUST_LOG=ytfast=debug,warn
+# The display's refresh rate, for frame-time checks (a virtual display may run at 30 Hz).
+# Over SSH Hyprland's instance isn't in the environment: use the newest one.
+[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] ||
+	HYPRLAND_INSTANCE_SIGNATURE="$(ls -t "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr" 2>/dev/null | head -1)"
+export HYPRLAND_INSTANCE_SIGNATURE
+refresh="$(hyprctl monitors -j 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["refreshRate"])' 2>/dev/null || echo 60)"
+set -- -E YTFAST_E2E_DIR="$dir" -E YTFAST_E2E_SCENARIO="$scenario" -E RUST_LOG=ytfast=debug,warn -E YTFAST_E2E_REFRESH_HZ="$refresh"
 log="${XDG_CACHE_HOME:-$HOME/.cache}/ytfast/ytfast.log"
 case "$scenario" in
 recovery)

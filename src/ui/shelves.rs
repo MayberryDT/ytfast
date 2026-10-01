@@ -537,6 +537,10 @@ fn top_result(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mu
                     6,
                     p,
                 );
+                #[cfg(feature = "e2e")]
+                if item.track.is_some() {
+                    crate::e2e::register(ui.ctx(), &format!("Play {}", item.title), rect);
+                }
                 if named(response, &item.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()

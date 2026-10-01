@@ -957,6 +957,15 @@ fn current_loaded(app: &App) -> bool {
         .is_some_and(|s| !s.cached && !s.loading && s.page.is_some())
 }
 
+/// The display's refresh rate as scripts/e2e.sh found it (60 if unknown).
+fn refresh_hz() -> f32 {
+    std::env::var("YTFAST_E2E_REFRESH_HZ")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|hz| *hz > 1.0)
+        .unwrap_or(60.0)
+}
+
 /// This process's resident memory in MB (mpv runs as its own process).
 fn rss_mb(_: &App) -> Value {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -2853,9 +2862,13 @@ fn surfaces() -> Vec<Step> {
             let (mean, worst, frames) = a.stage.frame_times();
             json!({"mean_stable_dt_ms": mean, "worst_stable_dt_ms": worst, "frames": frames})
         }),
-        wait("Stage frames under 20 ms on average", 1.0, |a| {
-            let (mean, _, frames) = a.stage.frame_times();
-            frames > 0 && mean < 20.0
+        // Every frame on time: the mean within 10 % of the display's frame
+        // interval and none longer than one and a half (ibara's virtual
+        // display on the OptiPlex runs at 30 Hz; scripts/e2e.sh passes the rate).
+        wait("Stage frames on time for the display", 1.0, |a| {
+            let (mean, worst, frames) = a.stage.frame_times();
+            let interval = 1000.0 / refresh_hz();
+            frames > 0 && mean < interval * 1.1 && worst < interval * 1.5
         }),
         // The pointer rests: the chrome fades.
         wait("chrome faded", 10.0, |a| a.stage.chrome < 0.05),
