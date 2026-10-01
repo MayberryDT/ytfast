@@ -160,16 +160,18 @@ fn motion() -> Vec<Step> {
     let home3 = View::Home.target();
     steps.extend([
         Step::Sleep(1.5),
-        click_with("a song on Home from a shelf of songs", move |a| {
+        click_first_visible("a song on Home from a shelf of songs", move |a| {
             // A shelf with several songs, so Next has a song ready to hand off to.
-            let page = a.page_state(&home3)?.page.as_ref()?;
+            let Some(page) = a.page_state(&home3).and_then(|s| s.page.as_ref()) else {
+                return Vec::new();
+            };
             page.shelves
                 .iter()
-                .find(|s| s.items.iter().filter(|i| i.track.is_some()).count() >= 4)?
-                .items
-                .iter()
-                .find(|i| i.track.is_some() && i.thumbnail.is_some())
+                .filter(|s| s.items.iter().filter(|i| i.track.is_some()).count() >= 4)
+                .flat_map(|s| &s.items)
+                .filter(|i| i.track.is_some() && i.thumbnail.is_some())
                 .map(|i| i.title.clone())
+                .collect()
         }),
     ]);
     steps.extend(burst(&[
@@ -804,6 +806,7 @@ pub fn take_registry(ctx: &egui::Context) -> Vec<(String, Rect)> {
 
 type Check = Box<dyn Fn(&App) -> bool>;
 type Label = Box<dyn Fn(&App) -> Option<String>>;
+type Candidates = Box<dyn Fn(&App) -> Vec<String>>;
 type Measure = Box<dyn Fn(&App) -> Value>;
 type Run = Box<dyn Fn(&mut App)>;
 
@@ -814,7 +817,8 @@ enum Step {
         check: Check,
     },
     Click {
-        label: Label,
+        /// Names to click; the first one visible this frame is used.
+        label: Candidates,
         describe: String,
         timeout: f64,
     },
@@ -866,7 +870,7 @@ fn click(label: &str) -> Step {
     let fixed = label.to_owned();
     Step::Click {
         describe: fixed.clone(),
-        label: Box::new(move |_| Some(fixed.clone())),
+        label: Box::new(move |_| vec![fixed.clone()]),
         timeout: 15.0,
     }
 }
@@ -874,7 +878,17 @@ fn click(label: &str) -> Step {
 fn click_with(describe: &str, label: impl Fn(&App) -> Option<String> + 'static) -> Step {
     Step::Click {
         describe: describe.to_owned(),
-        label: Box::new(label),
+        label: Box::new(move |a| label(a).into_iter().collect()),
+        timeout: 20.0,
+    }
+}
+
+/// Clicks the first of several candidates that is on screen (Home is
+/// personal and changes between runs; carousels hide most of their items).
+fn click_first_visible(describe: &str, labels: impl Fn(&App) -> Vec<String> + 'static) -> Step {
+    Step::Click {
+        describe: describe.to_owned(),
+        label: Box::new(labels),
         timeout: 20.0,
     }
 }
@@ -1004,6 +1018,24 @@ fn first_item_title(
         .flat_map(|s| &s.items)
         .find(|i| pick(i))
         .map(|i| i.title.clone())
+}
+
+fn item_titles(
+    app: &App,
+    target: &Target,
+    pick: impl Fn(&crate::model::Item) -> bool,
+) -> Vec<String> {
+    app.page_state(target)
+        .and_then(|s| s.page.as_ref())
+        .map(|page| {
+            page.shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter(|i| pick(i))
+                .map(|i| i.title.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---- account: likes, library, subscriptions, playlists ----
@@ -1689,8 +1721,8 @@ fn journey() -> Vec<Step> {
         // An album from Home's new releases.
         click("Home"),
         wait("home again", 30.0, |a| a.view == View::Home),
-        click_with("an album on Home", |a| {
-            first_item_title(a, &View::Home.target(), |i| {
+        click_first_visible("an album on Home", |a| {
+            item_titles(a, &View::Home.target(), |i| {
                 i.kind == crate::model::ItemKind::Album
             })
         }),
@@ -2859,24 +2891,23 @@ impl Driver {
                     let wanted = label(app);
                     let screen = ctx.content_rect();
                     // The last match: page content is drawn after the chrome.
-                    let found = wanted.as_ref().and_then(|w| {
+                    let found = wanted.iter().find_map(|w| {
                         registry
                             .iter()
                             .rev()
                             .find(|(l, r)| l == w && screen.contains(r.center()))
-                            .map(|(_, r)| *r)
+                            .map(|(l, r)| (l.clone(), *r))
                     });
                     match found {
-                        Some(rect) => {
-                            let line =
-                                format!("click {describe} = {:?}", wanted.unwrap_or_default());
-                            self.note(&line);
+                        Some((name, rect)) => {
+                            self.note(&format!("click {describe} = {name:?}"));
                             self.pending.push(Event::PointerMoved(rect.center()));
                             self.phase = Phase::Move(rect.center());
                         }
                         None if elapsed > *timeout => {
+                            let shown: Vec<&String> = wanted.iter().take(3).collect();
                             let message =
-                                format!("no visible control named {describe} ({wanted:?})");
+                                format!("no visible control named {describe} ({shown:?})");
                             self.fail(message);
                         }
                         None => {}
