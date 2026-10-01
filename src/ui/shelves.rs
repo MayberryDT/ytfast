@@ -37,6 +37,19 @@ fn play_item(item: &Item, shelf: &Shelf, actions: &mut Vec<Action>) {
     }
 }
 
+/// Where an item's cover flies when it's activated: songs and mixes start in
+/// the player, everything else opens its page under the header's cover.
+fn destination(item: &Item, play: bool) -> egui::Id {
+    let plays = item.track.is_some()
+        || (play && item.play.is_some())
+        || matches!(item.target, Some(crate::model::Target::Watch { .. }));
+    if plays {
+        motion::player_site()
+    } else {
+        motion::header_site()
+    }
+}
+
 pub(super) fn shelf_view(
     ui: &mut Ui,
     shelf: &Shelf,
@@ -236,7 +249,7 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
     }
     if response.clicked() {
         if let Some(url) = &item.thumbnail {
-            motion::launch(ui.ctx(), url, art, radius);
+            motion::launch_to(ui.ctx(), url, art, radius, destination(item, play_hit));
         }
         if play_hit {
             play_item(item, shelf, actions)
@@ -383,7 +396,7 @@ pub(super) fn row(
             .as_deref()
             .or(item.track.as_ref().and_then(|t| t.thumbnail.as_deref()))
         {
-            motion::launch(ui.ctx(), url, thumb, 4.0);
+            motion::launch_to(ui.ctx(), url, thumb, 4.0, destination(item, false));
         }
         activate(item, shelf, actions);
     }

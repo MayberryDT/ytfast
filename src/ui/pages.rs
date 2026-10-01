@@ -101,8 +101,9 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
         } else {
             // A cover on its way here lands in the header's place at once;
             // the real header takes it over when the page arrives.
-            let site = egui::Id::new("page-header-cover");
-            let flying = motion::landing_at(ui.ctx(), site).or_else(|| motion::unclaimed(ui.ctx()));
+            let site = motion::header_site();
+            let flying = motion::landing_at(ui.ctx(), site)
+                .or_else(|| motion::unclaimed_for(ui.ctx(), site));
             if let (Target::Browse { .. }, Some(url)) = (&state.target, flying) {
                 header_skeleton(ui, site, &url, p);
                 ui.add_space(28.0);
@@ -281,7 +282,7 @@ fn page_header(ui: &mut Ui, h: &Header, page: &Page, p: &Palette, actions: &mut 
     ui.horizontal_top(|ui| {
         let size = 232.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-        let site = egui::Id::new("page-header-cover");
+        let site = motion::header_site();
         landing_cover(ui, site, rect, h.thumbnail.as_deref(), h.round, 8, p);
         if let Some(url) = &h.thumbnail {
             let radius = if h.round { size / 2.0 } else { 8.0 };

@@ -146,7 +146,7 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         let art_now = motion::offset(art, 0.0, 0.9 * shift);
         landing_cover(
             &mut mid,
-            Id::new("player-cover"),
+            motion::player_site(),
             art_now,
             track.thumbnail.as_deref(),
             false,

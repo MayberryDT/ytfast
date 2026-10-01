@@ -27,7 +27,7 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         Vec2::splat(size),
     );
     let url = current.and_then(|t| t.thumbnail.as_deref());
-    landing_cover(ui, Id::new("now-playing-cover"), art, url, false, 8, p);
+    landing_cover(ui, motion::now_playing_site(), art, url, false, 8, p);
     if let Some(url) = url {
         motion::origin(ui.ctx(), "now-playing", url, art, 8.0);
     }

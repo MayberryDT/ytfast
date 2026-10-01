@@ -77,8 +77,26 @@ struct Flight {
     from: Rect,
     from_radius: f32,
     launched: f64,
+    /// The place this cover is going to, whatever image it shows there; with
+    /// none, any place showing the same image takes it.
+    to: Option<Id>,
     /// The place that took the cover and when: only it draws the flight.
     claim: Option<(Id, f64)>,
+}
+
+/// The page header's cover: where a card's cover goes when it opens a page.
+pub fn header_site() -> Id {
+    Id::new("page-header-cover")
+}
+
+/// The player bar's cover: where a song's cover goes when it starts.
+pub fn player_site() -> Id {
+    Id::new("player-cover")
+}
+
+/// Now Playing's large cover.
+pub fn now_playing_site() -> Id {
+    Id::new("now-playing-cover")
 }
 
 fn flight_id() -> Id {
@@ -89,9 +107,32 @@ fn origins_id() -> Id {
     Id::new("ytfast-cover-origins")
 }
 
-/// A cover leaves `from`: the next place that shows the same cover takes it
-/// over in flight (an album card → the album's header, a song → the player).
-pub fn launch(ctx: &Context, url: &str, from: Rect, radius: f32) {
+/// The image a cover URL shows, without its size: the same album art is
+/// asked for at different sizes and qualities in different places.
+fn cover_identity(url: &str) -> &str {
+    if let Some(rest) = url.split("i.ytimg.com/vi/").nth(1) {
+        // https://i.ytimg.com/vi/<video id>/<quality>.jpg
+        return rest.split('/').next().unwrap_or(rest);
+    }
+    match url.rfind('=') {
+        Some(eq) if url.contains("googleusercontent.com") || url.contains("ggpht.com") => {
+            &url[..eq]
+        }
+        _ => url,
+    }
+}
+
+fn same_cover(a: &str, b: &str) -> bool {
+    cover_identity(a) == cover_identity(b)
+}
+
+/// A cover leaves `from` for the place `to` (an album card → the album's
+/// header, a song → the player), whatever image that place ends up showing.
+pub fn launch_to(ctx: &Context, url: &str, from: Rect, radius: f32, to: Id) {
+    send(ctx, url, from, radius, Some(to));
+}
+
+fn send(ctx: &Context, url: &str, from: Rect, radius: f32, to: Option<Id>) {
     let now = ctx.input(|i| i.time);
     ctx.data_mut(|d| {
         d.insert_temp(
@@ -101,6 +142,7 @@ pub fn launch(ctx: &Context, url: &str, from: Rect, radius: f32) {
                 from,
                 from_radius: radius,
                 launched: now,
+                to,
                 claim: None,
             },
         )
@@ -121,14 +163,15 @@ pub fn origin(ctx: &Context, site: &str, url: &str, rect: Rect, radius: f32) {
 #[derive(Clone, Default)]
 struct Origins(Vec<(String, String, Rect, f32)>);
 
-/// Launches the cover last shown at `site`, if any.
-pub fn launch_from_origin(ctx: &Context, site: &str) {
+/// Launches the cover last shown at `site`, if any, towards `to` (or, with
+/// `None`, towards whatever place shows the same image).
+pub fn launch_from_origin(ctx: &Context, site: &str, to: Option<Id>) {
     let found = ctx.data(|d| {
         d.get_temp::<Origins>(origins_id())
             .and_then(|o| o.0.into_iter().find(|o| o.0 == site))
     });
     if let Some((_, url, rect, radius)) = found {
-        launch(ctx, &url, rect, radius);
+        send(ctx, &url, rect, radius, to);
     }
 }
 
@@ -141,12 +184,13 @@ pub fn clear_origin(ctx: &Context, site: &str) {
     });
 }
 
-/// The cover in flight that no place has taken yet, if any: a page still
-/// loading can offer it a place to land straight away.
-pub fn unclaimed(ctx: &Context) -> Option<String> {
+/// The cover on its way to `site` that hasn't landed yet, if any: a page
+/// still loading can offer it a place to land straight away.
+pub fn unclaimed_for(ctx: &Context, site: Id) -> Option<String> {
     let flight = ctx.data(|d| d.get_temp::<Flight>(flight_id()))?;
     let now = ctx.input(|i| i.time);
-    (flight.claim.is_none() && now - flight.launched <= UNCLAIMED).then_some(flight.url)
+    (flight.claim.is_none() && flight.to == Some(site) && now - flight.launched <= UNCLAIMED)
+        .then_some(flight.url)
 }
 
 /// The url of the cover landing at `site` right now.
@@ -155,16 +199,21 @@ pub fn landing_at(ctx: &Context, site: Id) -> Option<String> {
     (flight.claim.map(|(owner, _)| owner) == Some(site)).then_some(flight.url)
 }
 
-/// Called where a cover is about to be drawn at `dest`. When a cover with
-/// this `url` is in flight and this place claims it, the flight is painted
-/// above everything and `true` comes back: draw only the empty frame there.
+/// Called where a cover is about to be drawn at `dest`. When a cover in
+/// flight is addressed to this place (or, unaddressed, shows the same image)
+/// and this place claims it, the flight is painted above everything and
+/// `true` comes back: draw only the empty frame there.
 pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bool {
     let Some(url) = url else { return false };
     let ctx = ui.ctx();
     let Some(mut flight) = ctx.data(|d| d.get_temp::<Flight>(flight_id())) else {
         return false;
     };
-    if flight.url != url {
+    let for_here = match flight.to {
+        Some(to) => to == site,
+        None => same_cover(&flight.url, url),
+    };
+    if !for_here {
         return false;
     }
     let now = ctx.input(|i| i.time);
@@ -211,10 +260,22 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
         };
         over.painter().add(shadow.as_shape(rect, corner));
     }
-    egui::Image::new(url.to_owned())
+    // The cover that left is already decoded; when this place shows another
+    // image (or another size of it), that one fades in as the cover lands.
+    egui::Image::new(flight.url.clone())
         .corner_radius(corner)
         .show_loading_spinner(false)
         .paint_at(&over, rect);
+    if !same_cover(&flight.url, url) {
+        let fade = ((t / FLIGHT as f32 - 0.5) / 0.45).clamp(0.0, 1.0);
+        if fade > 0.0 {
+            egui::Image::new(url.to_owned())
+                .corner_radius(corner)
+                .tint(egui::Color32::WHITE.gamma_multiply(fade))
+                .show_loading_spinner(false)
+                .paint_at(&over, rect);
+        }
+    }
     ctx.request_repaint();
     true
 }
