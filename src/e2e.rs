@@ -1358,6 +1358,24 @@ fn account() -> Vec<Step> {
         Step::Sleep(1.5),
         Step::Screenshot("account-03-now-playing-liked"),
         click("Close player"),
+        // Once YouTube Music's own pages speak for the song again, the
+        // player bar still shows the like: Liked Music lists it, and the
+        // queue's copy of the song carries no rating of its own.
+        Step::Sleep(16.0),
+        run("fetch Liked Music", |a| {
+            set_confirmed();
+            a.ensure_page(Target::browse("VLLM"), true);
+        }),
+        wait("Liked Music fetched", 60.0, |a| {
+            refetched(a, &Target::browse("VLLM")).is_some()
+        }),
+        wait("player bar still shows the like", 1.0, |a| {
+            a.playback
+                .index
+                .and_then(|i| a.queue.get(i))
+                .map(|t| a.account_state.marks.like(t))
+                == Some(crate::model::LikeStatus::Like)
+        }),
         // Unlike from the song's row.
         hover_with("the liked song's row", |_| fact("liked_title")),
         Step::Sleep(0.5),

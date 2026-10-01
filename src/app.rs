@@ -547,6 +547,7 @@ impl App {
                         self.push_error(format!("Couldn't load more: {error}"));
                     }
                 }
+                self.account_more_arrived(&key);
             }
             Event::Suggestions { input, items } => {
                 if input == self.search {

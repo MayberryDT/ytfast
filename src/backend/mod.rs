@@ -388,6 +388,8 @@ struct Worker {
     advance_pending: bool,
     /// A track failed while offline; it plays when the connection returns.
     waiting_for_network: bool,
+    /// Account writes, made one at a time in the order asked (`account.rs`).
+    account_writes: Option<mpsc::UnboundedSender<account::Write>>,
     state: Playback,
     last_emit: Instant,
     /// mpv's `pause` and `idle-active`: playing means neither.
@@ -445,6 +447,7 @@ impl Worker {
             extending: false,
             advance_pending: false,
             waiting_for_network: false,
+            account_writes: None,
             state: Playback {
                 volume: 100.0,
                 autoplay: true,
