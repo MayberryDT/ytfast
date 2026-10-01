@@ -71,13 +71,19 @@ pub(super) fn shelf_view(
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if carousel {
-                    if icon_button(ui, Icon::ChevronRight, 18.0, p.text, p, "Scroll right")
-                        .clicked()
-                    {
+                    // Named with their shelf, for screen readers and E2E runs.
+                    let (right, left) = if shelf.title.is_empty() {
+                        ("Scroll right".to_owned(), "Scroll left".to_owned())
+                    } else {
+                        (
+                            format!("{}, scroll right", shelf.title),
+                            format!("{}, scroll left", shelf.title),
+                        )
+                    };
+                    if icon_button(ui, Icon::ChevronRight, 18.0, p.text, p, &right).clicked() {
                         nudge(ui, scroll_state, scroll_id, 1.0);
                     }
-                    if icon_button(ui, Icon::ChevronLeft, 18.0, p.text, p, "Scroll left").clicked()
-                    {
+                    if icon_button(ui, Icon::ChevronLeft, 18.0, p.text, p, &left).clicked() {
                         nudge(ui, scroll_state, scroll_id, -1.0);
                     }
                     ui.add_space(4.0);

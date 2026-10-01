@@ -180,16 +180,19 @@ fn motion() -> Vec<Step> {
     // Physical feel: pause/play morph, and a carousel gliding to a card edge.
     steps.extend([Step::Sleep(1.5), click("Pause")]);
     steps.extend(burst(&["10-morph-a", "10-morph-b", "10-morph-c"]));
-    steps.extend([Step::Sleep(1.0), click("Scroll right")]);
-    steps.extend(burst(&["11-glide-a", "11-glide-b", "11-glide-c"]));
+    let home4 = View::Home.target();
     steps.extend([
         Step::Sleep(1.0),
-        Step::Screenshot("11-glide-settled"),
-        measure("carousel_offsets", |a| {
-            let _ = a;
-            json!(null)
+        click_with("the first carousel's scroll-right arrow", move |a| {
+            let page = a.page_state(&home4)?.page.as_ref()?;
+            page.shelves
+                .iter()
+                .find(|s| s.style == crate::model::ShelfStyle::Carousel && s.items.len() > 8)
+                .map(|s| format!("{}, scroll right", s.title))
         }),
     ]);
+    steps.extend(burst(&["11-glide-a", "11-glide-b", "11-glide-c"]));
+    steps.extend([Step::Sleep(1.0), Step::Screenshot("11-glide-settled")]);
     steps.extend([
         Step::Sleep(1.0),
         run("pause", |a| {

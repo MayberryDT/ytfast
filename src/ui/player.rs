@@ -359,7 +359,9 @@ fn play_pause_glyph(ui: &Ui, center: egui::Pos2, r: f32, m: f32, color: egui::Co
         at(xm, -top(xm)),
         at(x0, half),
     ];
-    let play_right = [at(xm, top(xm)), at(x1, 0.0), at(x1, 0.0), at(xm, -top(xm))];
+    // The right half starts a hair inside the left one: no antialiased seam.
+    let xr = xm - 0.06;
+    let play_right = [at(xr, top(xr)), at(x1, 0.0), at(x1, 0.0), at(xr, -top(xr))];
     let (bar, gap, h) = (0.36, 0.2, 0.64);
     let pause_left = [
         at(-gap - bar, -h),
