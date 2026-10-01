@@ -3,14 +3,24 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Command, Event};
+use crate::desktop::{Flags, Request};
 use crate::model::{Account, Lyrics, Page, Playback, Target, Track};
 use crate::parse::More;
 use crate::paths::Paths;
 use crate::theme::Palette;
+
+/// Which window the app shows: the full window or the mini player. They
+/// are separate native windows; switching closes one and opens the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WindowKind {
+    #[default]
+    Main,
+    Mini,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryTab {
@@ -128,6 +138,12 @@ pub enum Action {
     Copy(String),
     /// The pointer rests on a song: resolve it ahead of a likely click.
     Prepare(String),
+    /// Quit for real (Ctrl+Q): playback stops.
+    Quit,
+    /// Switch to the mini player (`true`) or back to the full window.
+    MiniPlayer(bool),
+    /// Settings: song-change notifications on or off.
+    Notifications(bool),
 }
 
 pub struct App {
@@ -137,8 +153,28 @@ pub struct App {
     themes: fastframe_theme::Catalog<Palette>,
     transition: fastframe_theme::Transition,
     paths: Paths,
-    show_requested: Arc<AtomicBool>,
-    reload_themes: Arc<AtomicBool>,
+    /// Detected once; each new window gets a copy.
+    fonts: egui::FontDefinitions,
+    /// Repaints whichever window is open, and nothing while none is.
+    waker: fastframe_shell::Waker,
+    /// What MPRIS and the command line ask of the interface.
+    requests: std::sync::mpsc::Receiver<Request>,
+    /// Feeds `requests`: links in files dropped on the window, read off the UI thread.
+    request_tx: std::sync::mpsc::Sender<Request>,
+    /// Shared with MPRIS and notifications.
+    pub desktop: Arc<Flags>,
+    reload_themes: bool,
+    /// The kind of window open, or to open next.
+    pub window: WindowKind,
+    /// No window is open: it was closed while music played, and the app runs
+    /// on in the background until it is shown again or quits.
+    pub hidden: bool,
+    /// The app ends when the window closes (Ctrl+Q, `ytfast quit`, MPRIS Quit).
+    pub(crate) quit_requested: bool,
+    /// The window closes to reopen as the other kind.
+    switch_window: bool,
+    /// Show was asked for while no window was open.
+    wants_show: bool,
 
     pub account: Account,
     /// Browser profiles signed in to YouTube, and the one in use.
@@ -170,28 +206,22 @@ pub struct App {
 }
 
 impl App {
+    /// The app's state, which outlives its windows; [`App::attach`] sets up
+    /// each window.
     pub fn new(
-        cc: &eframe::CreationContext<'_>,
         backend: Backend,
         paths: Paths,
-        show_requested: Arc<AtomicBool>,
-        reload_themes: Arc<AtomicBool>,
+        desktop: Arc<Flags>,
+        (request_tx, requests): (
+            std::sync::mpsc::Sender<Request>,
+            std::sync::mpsc::Receiver<Request>,
+        ),
+        waker: fastframe_shell::Waker,
         started: Instant,
     ) -> Self {
-        let ctx = &cc.egui_ctx;
         let mut fonts = fastframe_fonts::FontSetup::default().definitions();
         fastframe_text::detect().apply_to(&mut fonts);
-        ctx.set_fonts(fonts);
-        egui_extras::install_image_loaders(ctx);
-        fastframe_icons::install::<crate::icons::Icon>(ctx);
-        ctx.add_bytes_loader(Arc::new(crate::covers::CoverLoader::new(
-            backend.runtime.clone(),
-            backend.http.clone(),
-            paths.clone(),
-        )));
-        ctx.options_mut(|o| o.reduce_texture_memory = true);
         let palette = Palette::default();
-        crate::theme::apply(ctx, &palette);
 
         let mut themes = fastframe_theme::Catalog::default();
         themes.enable_desktop_themes(fastframe_theme::DesktopThemes {
@@ -202,13 +232,22 @@ impl App {
         });
         let mut app = Self {
             backend,
-            palette: palette.clone(),
-            applied: Some(palette),
+            palette,
+            applied: None,
             themes,
             transition: fastframe_theme::Transition::new(fastframe_theme::Reveal::Band),
             paths,
-            show_requested,
-            reload_themes,
+            fonts,
+            waker,
+            requests,
+            request_tx,
+            desktop,
+            reload_themes: false,
+            window: WindowKind::Main,
+            hidden: false,
+            quit_requested: false,
+            switch_window: false,
+            wants_show: false,
             account: Account::Checking,
             profiles: Vec::new(),
             profile: None,
@@ -234,15 +273,34 @@ impl App {
             e2e: crate::e2e::Driver::from_env(),
             themed: false,
         };
-        app.start_themes(ctx);
+        app.start_themes();
         app.ensure_page(View::Home.target(), false);
         app.ensure_page(LibraryTab::Playlists.target(), false);
         app
     }
 
-    fn start_themes(&mut self, ctx: &egui::Context) {
-        let ctx = ctx.clone();
-        let waker = fastframe_theme::Waker::new(move || ctx.request_repaint());
+    /// Sets up a new window: fonts, image loaders, icons, the palette.
+    pub fn attach(&mut self, ctx: &egui::Context) {
+        ctx.set_fonts(self.fonts.clone());
+        egui_extras::install_image_loaders(ctx);
+        fastframe_icons::install::<crate::icons::Icon>(ctx);
+        ctx.add_bytes_loader(Arc::new(crate::covers::CoverLoader::new(
+            self.backend.runtime.clone(),
+            self.backend.http.clone(),
+            self.paths.clone(),
+        )));
+        ctx.options_mut(|o| o.reduce_texture_memory = true);
+        crate::theme::apply(ctx, &self.palette);
+        self.applied = Some(self.palette.clone());
+        self.transition = fastframe_theme::Transition::new(fastframe_theme::Reveal::Band);
+        self.hidden = false;
+        self.wants_show = false;
+        self.switch_window = false;
+    }
+
+    fn start_themes(&mut self) {
+        let waker = self.waker.clone();
+        let waker = fastframe_theme::Waker::new(move || waker.wake());
         self.themes.start(
             self.paths.config.join("themes"),
             Some(fastframe_theme::omarchy::FILENAME.into()),
@@ -458,7 +516,13 @@ impl App {
             }
             Action::Search(query) => {
                 let query = query.trim().to_owned();
-                if !query.is_empty() {
+                if crate::links::target_from_link(&query).is_some() {
+                    // A pasted link opens what it links to.
+                    self.search.clear();
+                    self.suggestions.clear();
+                    ctx.memory_mut(|m| m.stop_text_input());
+                    self.open_link(ctx, &query);
+                } else if !query.is_empty() {
                     self.search = query.clone();
                     self.suggestions.clear();
                     self.open(View::Page(Target::Search {
@@ -496,6 +560,120 @@ impl App {
                     self.backend.send(Command::Prepare(video_id));
                 }
             }
+            Action::Quit => self.quit(ctx),
+            Action::MiniPlayer(on) => {
+                if !on || !self.queue.is_empty() {
+                    self.switch(
+                        ctx,
+                        if on {
+                            WindowKind::Mini
+                        } else {
+                            WindowKind::Main
+                        },
+                    );
+                }
+            }
+            Action::Notifications(on) => {
+                self.desktop.notifications.store(on, Ordering::Relaxed);
+                self.backend.send(Command::Notifications(on));
+            }
+        }
+    }
+
+    /// Opens a YouTube Music or YouTube link: a song starts playing, a page
+    /// opens (and the window comes back to show it).
+    pub(crate) fn open_link(&mut self, ctx: &egui::Context, link: &str) {
+        let Some(target) = crate::links::target_from_link(link) else {
+            self.push_error("That isn't a YouTube Music or YouTube link.".into());
+            return;
+        };
+        log::info!("opening a link: {}", target.key());
+        match View::for_target(&target) {
+            Some(view) => {
+                self.open(view);
+                if self.window == WindowKind::Mini {
+                    self.switch(ctx, WindowKind::Main);
+                }
+                self.show(ctx);
+            }
+            None => self.backend.send(Command::PlayTarget(target)),
+        }
+    }
+
+    /// Brings the window back: reopens it if it was closed, else raises it.
+    fn show(&mut self, ctx: &egui::Context) {
+        if self.hidden {
+            self.wants_show = true;
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// Quits for real: the window closes and the app ends, stopping playback.
+    pub(crate) fn quit(&mut self, ctx: &egui::Context) {
+        self.quit_requested = true;
+        if !self.hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Closes this window to open the other kind in its place.
+    fn switch(&mut self, ctx: &egui::Context, kind: WindowKind) {
+        if kind == self.window {
+            return;
+        }
+        self.window = kind;
+        if self.hidden {
+            self.wants_show = true;
+        } else {
+            self.switch_window = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Backend events and outside requests: every frame, and every tick of
+    /// the background loop while no window is open.
+    fn background(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = self.backend.events.try_recv() {
+            self.handle(event);
+        }
+        while let Ok(request) = self.requests.try_recv() {
+            match request {
+                Request::Show => self.show(ctx),
+                Request::Quit => self.quit(ctx),
+                Request::Open(link) => self.open_link(ctx, &link),
+                Request::Like => {
+                    // integrator: route to Action::ToggleLikeCurrent
+                    log::info!("like asked for from outside the window (not wired yet)");
+                }
+                Request::ReloadThemes => self.reload_themes = true,
+            }
+        }
+    }
+
+    /// Links dropped on the window. winit delivers dropped files (X11; the
+    /// pinned Wayland backend delivers no drops at all), so a `.url` file or
+    /// a text file holding a link opens it; the file is read off this thread.
+    fn dropped(&self, ctx: &egui::Context) {
+        let files = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in files {
+            let path = file.path().to_path_buf();
+            let tx = self.request_tx.clone();
+            let waker = self.waker.clone();
+            self.backend.runtime.spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let Ok(file) = tokio::fs::File::open(&path).await else {
+                    return;
+                };
+                let mut text = Vec::new();
+                if file.take(64 * 1024).read_to_end(&mut text).await.is_ok()
+                    && let Some(link) = crate::links::find_link(&String::from_utf8_lossy(&text))
+                {
+                    let _ = tx.send(Request::Open(link.to_owned()));
+                    waker.wake();
+                }
+            });
         }
     }
 
@@ -514,8 +692,8 @@ impl App {
     }
 
     fn theme_frame(&mut self, ctx: &egui::Context) {
-        if self.reload_themes.swap(false, Ordering::Relaxed) || self.themes.needs_reload() {
-            self.start_themes(ctx);
+        if std::mem::take(&mut self.reload_themes) || self.themes.needs_reload() {
+            self.start_themes();
         }
         if self.themes.poll()
             && let Some(theme) = self.themes.system_theme()
@@ -536,24 +714,23 @@ impl App {
             }
         }
     }
-}
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// One frame of the open window.
+    fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        while let Ok(event) = self.backend.events.try_recv() {
-            self.handle(event);
-        }
-        if self.show_requested.swap(false, Ordering::Relaxed) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
+        self.background(&ctx);
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        self.desktop.focused.store(focused, Ordering::Relaxed);
+        self.dropped(&ctx);
         self.theme_frame(&ctx);
 
         #[cfg(feature = "e2e")]
         let registry = crate::e2e::take_registry(&ctx);
         let mut actions = Vec::new();
-        crate::ui::draw(self, ui, &mut actions);
+        match self.window {
+            WindowKind::Main => crate::ui::draw(self, ui, &mut actions),
+            WindowKind::Mini => crate::ui::mini::draw(self, ui, &mut actions),
+        }
         for action in actions {
             self.apply(&ctx, action);
         }
@@ -573,10 +750,68 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// Closing the window plays on: the window goes away, and the app (backend,
+/// MPRIS, the command line) keeps running until it is shown again or quits.
+/// Wayland can't hide a window, so it is closed and made again on demand.
+impl fastframe_shell::Resident for App {
+    fn closed(&self) -> fastframe_shell::Closed {
+        use fastframe_shell::Closed;
+        if self.quit_requested {
+            Closed::Quit
+        } else if self.switch_window {
+            Closed::Reopen
+        } else if !self.queue.is_empty() {
+            Closed::Hide
+        } else {
+            Closed::Quit
+        }
+    }
+
+    fn window_gone(&mut self) {
+        log::info!("window closed; playing on in the background");
+        self.hidden = true;
+        self.switch_window = false;
+        self.wants_show = false;
+        self.desktop.focused.store(false, Ordering::Relaxed);
+    }
+
+    /// A tick every 150 ms while no window is open: no drawing, no repaints.
+    fn headless_frame(&mut self, ctx: &egui::Context) -> fastframe_shell::Headless {
+        use fastframe_shell::Headless;
+        self.background(ctx);
+        #[cfg(feature = "e2e")]
+        if let Some(mut driver) = self.e2e.take() {
+            driver.frame(self, ctx, Vec::new());
+            self.e2e = Some(driver);
+        }
+        if self.quit_requested {
+            Headless::Quit
+        } else if self.wants_show {
+            Headless::Show
+        } else {
+            Headless::Wait
+        }
+    }
+
+    fn shutdown(&mut self) {
+        // The backend goes with the app; its runtime stops mpv (kill on drop).
+        log::info!("quitting");
+    }
+}
+
+/// The app as held by one native window.
+pub struct Window(pub fastframe_shell::Held<App>);
+
+impl eframe::App for Window {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.0.frame(ui);
+    }
 
     #[cfg(feature = "e2e")]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if let Some(driver) = &mut self.e2e {
+        if let Some(driver) = &mut self.0.e2e {
             driver.inject(raw_input);
         }
     }

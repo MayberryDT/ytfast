@@ -10,6 +10,9 @@ pub struct Settings {
     /// unset means the most recently used signed-in profile.
     #[serde(default)]
     pub browser_profile: Option<String>,
+    /// Show a desktop notification when the song changes (off by default).
+    #[serde(default)]
+    pub notifications: bool,
 }
 
 impl Settings {

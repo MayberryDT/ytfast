@@ -28,8 +28,35 @@ These were taken signed out, so they show public YouTube Music rather than anyon
 - A queue, gapless playback, shuffle, repeat, radio and mixes, lyrics, and Up next
 - Audio at the best quality your account gets (Opus at about 256 kbps with YouTube Music Premium)
 - Plays count in your YouTube Music history, so your recommendations keep learning
+- Media keys, `playerctl` and the Omarchy bar's media widget (MPRIS), playing on after you close the window, a command line, a mini player, and song-change notifications if you want them
 
-It doesn't change anything else in your account: no likes, no playlist editing. There's no MPRIS, tray or notifications yet.
+It doesn't change anything else in your account: no likes, no playlist editing.
+
+## On the desktop
+
+Closing the window keeps the music playing. Launch Music again (or run `ytfast show`, or raise it from the media widget) and it comes back where you left it. **Ctrl+Q** quits and stops the music; closing the window with nothing queued quits too.
+
+The running app takes commands, for Hyprland bindings and scripts:
+
+```sh
+ytfast toggle            # play or pause (also: play, pause)
+ytfast next              # or: previous
+ytfast like              # like or unlike the playing song
+ytfast show              # bring back the window
+ytfast open <link>       # a YouTube Music or YouTube link; starts Music if it isn't running
+ytfast quit              # quit and stop the music
+```
+
+Links open in ytfast too when you paste one into the search field. Songs start playing; albums, artists, playlists and searches open their page. Dropping a link file on the window works under X11, but not on Wayland: the windowing library ytfast uses doesn't receive drops there yet.
+
+**Ctrl+M** (or the button next to the volume) switches to the mini player, a small window with the cover, the song, a progress bar and the controls. Its button on the right brings back the full window. To keep it floating above other windows in Hyprland:
+
+```ini
+windowrule = float, class:ytfast-mini
+windowrule = pin, class:ytfast-mini
+```
+
+Song-change notifications are off by default; turn them on in **Settings**. They don't appear while a ytfast window has the focus.
 
 ## How it signs in
 
@@ -60,13 +87,13 @@ The release build takes several minutes and a few GB of memory. Logs go to `~/.c
 
 [docs/SPEC.md](docs/SPEC.md) describes the product: what each screen does and what's deliberately left out. [docs/integration.md](docs/integration.md) has the verified facts it relies on (cookie decryption, YouTube's API, stream formats) and the design. [AGENTS.md](AGENTS.md) holds the rules for coding agents, and for people too.
 
-`scripts/e2e.sh [journey|recovery|offline|theme|showcase]` builds with the `e2e` feature and drives the real app on your desktop. The first four use your signed-in account and leave screenshots, logs and a summary in `artifacts/e2e/`, which git ignores because they show account data. `showcase` runs signed out and takes the pictures above.
+`scripts/e2e.sh [journey|recovery|offline|theme|showcase|desktop]` builds with the `e2e` feature and drives the real app on your desktop. All but `showcase` use your signed-in account and leave screenshots, logs and a summary in `artifacts/e2e/`, which git ignores because they show account data. `showcase` runs signed out and takes the pictures above. `desktop` also needs `playerctl` and a notification daemon.
 
 Issues and pull requests are welcome.
 
 ## Credits
 
-- [fastframe](https://github.com/crmne/fastframe) by Carmine Paolino (MIT): the theme, fonts, icons, text and logging crates, and his forks of [egui](https://github.com/crmne/egui) and [winit](https://github.com/crmne/winit). ytfast copies the shape of [ZapFast](https://github.com/crmne/zapfast) and [Spotifast](https://github.com/crmne/spotifast).
+- [fastframe](https://github.com/crmne/fastframe) by Carmine Paolino (MIT): the theme, fonts, icons, text, logging and shell crates, and his forks of [egui](https://github.com/crmne/egui) and [winit](https://github.com/crmne/winit). ytfast copies the shape of [ZapFast](https://github.com/crmne/zapfast) and [Spotifast](https://github.com/crmne/spotifast); its MPRIS service follows Spotifast's.
 - [egui](https://github.com/emilk/egui) by Emil Ernerfeldt and contributors.
 - [mpv](https://mpv.io) plays the audio and [yt-dlp](https://github.com/yt-dlp/yt-dlp) finds the streams; ytfast runs both as separate programs.
 - Icons from [Lucide](https://lucide.dev) (ISC, see `assets/icons/LICENSE.txt`).

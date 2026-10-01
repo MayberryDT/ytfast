@@ -26,6 +26,19 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
         {
             actions.push(Action::Command(Command::Autoplay(autoplay)));
         }
+        let mut notifications = app
+            .desktop
+            .notifications
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let response = ui.checkbox(
+            &mut notifications,
+            "Show a notification when the song changes",
+        );
+        #[cfg(feature = "e2e")]
+        crate::e2e::register(&response.ctx, "Song notifications", response.interact_rect);
+        if response.changed() {
+            actions.push(Action::Notifications(notifications));
+        }
         ui.add_space(8.0);
         label(ui, "Account", 12.0, Weight::SemiBold, p.secondary);
         let status = match &app.account {

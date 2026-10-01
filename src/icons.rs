@@ -32,5 +32,7 @@ fastframe_icons::icons! {
         Alert => lucide "circle-alert",
         User => lucide "user",
         Settings => lucide "settings",
+        MiniPlayer => lucide "minimize-2",
+        FullPlayer => lucide "maximize-2",
     }
 }

@@ -73,6 +73,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "offline" => no_connection(),
         "theme" => theme(),
         "showcase" => showcase(),
+        "desktop" => desktop(),
         _ => journey(),
     }
 }
@@ -353,6 +354,246 @@ fn showcase() -> Vec<Step> {
     ]
 }
 
+/// A public YouTube Music playlist (override with `YTFAST_E2E_PLAYLIST`).
+fn public_playlist() -> String {
+    std::env::var("YTFAST_E2E_PLAYLIST")
+        .unwrap_or_else(|_| "RDCLAK5uy_k6ACq4WNfG-uJSz_jML9ZkUEULUoCzWIw".into())
+}
+
+/// Runs a program to completion: its exit status and output.
+fn exec(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Value {
+    match std::process::Command::new(program).args(args).output() {
+        Ok(output) => json!({
+            "args": args,
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout).trim(),
+            "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+        }),
+        Err(error) => json!({"args": args, "error": error.to_string()}),
+    }
+}
+
+/// The binary under test, driving itself as a second launch would.
+fn ytfast_command(args: &[&str]) -> Value {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ytfast"));
+    exec(exe, args)
+}
+
+fn playerctl(args: &[&str]) -> Value {
+    let mut all = vec!["-p", "ytfast"];
+    all.extend_from_slice(args);
+    exec("playerctl", &all)
+}
+
+fn stdout(value: &Value) -> String {
+    value["stdout"].as_str().unwrap_or_default().to_owned()
+}
+
+/// A song id or page id remembered by one step for a later one.
+static MARK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn set_mark(value: String) {
+    if let Ok(mut mark) = MARK.lock() {
+        *mark = value;
+    }
+}
+
+fn mark() -> String {
+    MARK.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+fn playing_id(app: &App) -> Option<String> {
+    app.playback
+        .index
+        .and_then(|i| app.queue.get(i))
+        .map(|t| t.video_id.clone())
+}
+
+/// Another song than the marked one is playing.
+fn song_changed(app: &App) -> bool {
+    app.playback.playing && playing_id(app).is_some_and(|id| id != mark())
+}
+
+/// `check`, at most once a second (it runs a program).
+fn every_second(check: impl Fn(&App) -> bool + 'static) -> impl Fn(&App) -> bool + 'static {
+    let last = std::cell::Cell::new(None::<Instant>);
+    let passed = std::cell::Cell::new(false);
+    move |app| {
+        if last
+            .get()
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(1))
+        {
+            last.set(Some(Instant::now()));
+            passed.set(check(app));
+        }
+        passed.get()
+    }
+}
+
+/// The playing song's first artist page, as a music.youtube.com link.
+fn artist_link(app: &App) -> Option<String> {
+    let track = app.playback.index.and_then(|i| app.queue.get(i))?;
+    track.artists.iter().find_map(|run| match &run.target {
+        Some(Target::Browse { id, .. }) if id.starts_with("UC") => {
+            Some(format!("https://music.youtube.com/channel/{id}"))
+        }
+        _ => None,
+    })
+}
+
+/// The desktop journey (SPEC § Completion evidence 8): MPRIS through
+/// `playerctl`, playing on with the window closed, the command line
+/// (`ytfast show|next|open`) on the binary under test, a pasted link, the
+/// mini player, and a song-change notification while the window is closed.
+/// Leaves notifications off, as they are by default, and playback paused.
+fn desktop() -> Vec<Step> {
+    let home = View::Home.target();
+    let playlist = public_playlist();
+    let playlist_page = Target::browse(format!("VL{playlist}"));
+    vec![
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 1)),
+        run("play a public playlist", move |a| {
+            a.backend.send(Command::PlayTarget(Target::Watch {
+                video_id: None,
+                playlist_id: Some(public_playlist()),
+                params: None,
+            }))
+        }),
+        wait("playing", 90.0, |a| {
+            a.playback.playing && a.playback.position > 1.0
+        }),
+        measure("first_song", playing_track),
+        // MPRIS, read and driven by playerctl.
+        wait(
+            "playerctl shows the song, playing",
+            15.0,
+            every_second(|a| {
+                let title = stdout(&playerctl(&["metadata", "xesam:title"]));
+                let status = stdout(&playerctl(&["status"]));
+                let track = a.playback.index.and_then(|i| a.queue.get(i));
+                status == "Playing" && track.is_some_and(|t| t.title == title)
+            }),
+        ),
+        measure("playerctl_metadata", |_| playerctl(&["metadata"])),
+        measure("playerctl_status", |_| playerctl(&["status"])),
+        measure("playerctl_position", |_| playerctl(&["position"])),
+        run("mark the song", |a| {
+            set_mark(playing_id(a).unwrap_or_default())
+        }),
+        measure("playerctl_next", |_| playerctl(&["next"])),
+        wait("playerctl next changed the song", 60.0, song_changed),
+        measure("after_playerctl_next", playing_track),
+        // Notifications on, through Settings.
+        click("Settings"),
+        click("Song notifications"),
+        wait("notifications on", 10.0, |a| {
+            a.desktop
+                .notifications
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }),
+        Step::Key(egui::Key::Escape),
+        Step::Sleep(1.0),
+        // Closing the window plays on.
+        Step::Window("close the window", egui::ViewportCommand::Close),
+        wait("window closed, still playing", 15.0, |a| {
+            a.hidden && a.playback.playing
+        }),
+        Step::Sleep(3.0),
+        measure("playing_while_closed", playing_track),
+        measure("status_while_closed", |_| playerctl(&["status"])),
+        // A song change with no window focused: a notification.
+        run("mark the song", |a| {
+            set_mark(playing_id(a).unwrap_or_default())
+        }),
+        measure("ytfast_next_while_closed", |_| ytfast_command(&["next"])),
+        wait("song changed while closed", 60.0, song_changed),
+        wait("notification sent", 20.0, |a| {
+            let track = a.playback.index.and_then(|i| a.queue.get(i));
+            crate::notify::last_sent()
+                .is_some_and(|(_, title)| track.is_some_and(|t| t.title == title))
+        }),
+        measure("notification", |_| {
+            json!(crate::notify::last_sent().map(|(id, title)| json!({"id": id, "title": title})))
+        }),
+        // `ytfast show` brings the window back.
+        measure("ytfast_show", |_| ytfast_command(&["show"])),
+        wait("window back", 20.0, |a| !a.hidden),
+        Step::Sleep(3.0),
+        Step::Screenshot("d1-shown-again"),
+        run("mark the song", |a| {
+            set_mark(playing_id(a).unwrap_or_default())
+        }),
+        measure("ytfast_next", |_| ytfast_command(&["next"])),
+        wait("ytfast next changed the song", 60.0, song_changed),
+        measure("after_ytfast_next", playing_track),
+        // `ytfast open <link>` opens the playlist's page.
+        measure("ytfast_open", move |_| {
+            ytfast_command(&[
+                "open",
+                &format!("https://music.youtube.com/playlist?list={playlist}"),
+            ])
+        }),
+        wait("linked playlist page", 60.0, move |a| {
+            a.view == View::Page(playlist_page.clone()) && current_loaded(a)
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("d2-opened-link"),
+        // A link pasted into search opens its page.
+        wait("an artist link", 30.0, |a| artist_link(a).is_some()),
+        run("remember the artist", |a| {
+            set_mark(artist_link(a).unwrap_or_default())
+        }),
+        click("Search"),
+        Step::Paste(Box::new(artist_link)),
+        wait("pasted artist page", 60.0, |a| {
+            let wanted = mark();
+            matches!(&a.view, View::Page(Target::Browse { id, .. }) if wanted.ends_with(id.as_str()))
+                && current_loaded(a)
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("d3-pasted-link"),
+        // The mini player: its own window, driving the same session.
+        click("Mini player"),
+        wait("mini player open", 20.0, |a| {
+            a.window == crate::app::WindowKind::Mini && !a.hidden
+        }),
+        Step::Sleep(3.0),
+        Step::Screenshot("d4-mini-player"),
+        run("mark the song", |a| {
+            set_mark(playing_id(a).unwrap_or_default())
+        }),
+        click("Next"),
+        wait(
+            "the mini player's Next changed the song",
+            60.0,
+            song_changed,
+        ),
+        Step::Sleep(1.0),
+        Step::Screenshot("d5-mini-player-next"),
+        click("Full player"),
+        wait("full window again", 20.0, |a| {
+            a.window == crate::app::WindowKind::Main && !a.hidden
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("d6-full-window"),
+        // Leave things as they were: notifications off, paused.
+        run("notifications off, pause", |a| {
+            a.desktop
+                .notifications
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            a.backend.send(Command::Notifications(false));
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        wait(
+            "playerctl shows paused",
+            15.0,
+            every_second(|_| stdout(&playerctl(&["status"])) == "Paused"),
+        ),
+    ]
+}
+
 /// Opens the first item on the current page that `pick` accepts, as a click
 /// on it would; false if there is none.
 fn open_item(app: &mut App, pick: impl Fn(&crate::model::Item) -> bool) -> bool {
@@ -420,6 +661,10 @@ enum Step {
         timeout: f64,
     },
     Type(String),
+    /// Pastes text (as Ctrl+V would) into the focused field.
+    Paste(Label),
+    /// Asks the window for something, as the user or compositor would.
+    Window(&'static str, egui::ViewportCommand),
     Key(egui::Key),
     Screenshot(&'static str),
     Measure {
@@ -809,6 +1054,8 @@ impl Driver {
         ctx.request_repaint();
         if self.index >= self.steps.len() {
             self.finish(ctx);
+            // The run is over: quit, even with music in the queue.
+            app.quit(ctx);
             return;
         }
         // The steps are taken out while one runs, so it can log and advance.
@@ -900,6 +1147,19 @@ impl Driver {
                 self.pending.push(Event::Text(text.clone()));
                 let line = format!("type {text:?}");
                 self.note(&line);
+                self.advance();
+            }
+            Step::Paste(text) => match text(app) {
+                Some(text) => {
+                    self.note(&format!("paste {text:?}"));
+                    self.pending.push(Event::Paste(text));
+                    self.advance();
+                }
+                None => self.fail("nothing to paste".into()),
+            },
+            Step::Window(what, command) => {
+                ctx.send_viewport_cmd(command.clone());
+                self.note(&format!("window: {what}"));
                 self.advance();
             }
             Step::Key(key) => {

@@ -23,6 +23,9 @@ fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+# Keeps the app (audio, MPRIS) alive between windows: closing the window
+# plays on, and the shell recreates the window on demand (src/main.rs).
+fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 anyhow = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +35,11 @@ fastrand = "2"
 # The backend runtime: InnerTube requests, cover downloads, mpv IPC and yt-dlp.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "brotli"] }
+# MPRIS and desktop notifications over the session bus, served from the
+# backend's tokio runtime. The same zbus AccessKit already brings in, with the
+# same `async-io` reactor: zbus's `tokio` feature would apply to AccessKit's
+# zbus too, and accesskit_unix can't run its D-Bus thread with both.
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 # Reads the browser's cookie store (a copy; the browser keeps it open).
 rusqlite = "0.37"
 # Chromium's cookie encryption on Linux: PBKDF2-SHA1 key, AES-128-CBC.
