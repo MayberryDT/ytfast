@@ -23,6 +23,8 @@ pub(super) fn sidebar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Act
     ui.add_space(20.0);
     let current = match &app.view {
         View::Home => 0,
+        // A Home mood (Energize, Relax…) is still Home.
+        View::Page(crate::model::Target::Browse { id, .. }) if id == "FEmusic_home" => 0,
         View::Explore => 1,
         View::Library(_) => 2,
         View::Page(_) => 3,
@@ -192,6 +194,18 @@ fn search_box(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>
     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         actions.push(Action::Search(app.search.clone()));
     }
+    // Removing a recent search takes the focus from the field on release;
+    // give it back so the list stays open.
+    let refocus = Id::new("search-refocus");
+    if ui.data(|d| d.get_temp::<bool>(refocus)).unwrap_or(false)
+        && !ui.input(|i| i.pointer.any_down())
+    {
+        ui.data_mut(|d| d.remove::<bool>(refocus));
+        response.request_focus();
+    }
+    if response.has_focus() && app.search.trim().is_empty() && !app.recent_searches.is_empty() {
+        recent_searches(app, ui, inner.response.rect, p, actions, refocus);
+    }
     // Suggestions below the field while it has focus.
     if response.has_focus() && !app.suggestions.is_empty() && !app.search.trim().is_empty() {
         let rect = inner.response.rect;
@@ -240,6 +254,119 @@ fn search_box(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>
                     });
             });
     }
+}
+
+/// The recent searches, below the empty field while it has focus.
+fn recent_searches(
+    app: &App,
+    ui: &Ui,
+    rect: Rect,
+    p: &Palette,
+    actions: &mut Vec<Action>,
+    refocus: Id,
+) {
+    egui::Area::new(Id::new("recent-searches"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0, p.outline))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(rect.width() - 12.0);
+                    let (head, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                    ui.painter().text(
+                        pos2(head.left() + 10.0, head.center().y),
+                        Align2::LEFT_CENTER,
+                        "Recent searches",
+                        font(Weight::SemiBold, 12.5),
+                        p.secondary,
+                    );
+                    let clear_galley = ui.painter().layout_no_wrap(
+                        "Clear".to_owned(),
+                        font(Weight::Medium, 13.0),
+                        p.secondary,
+                    );
+                    let clear = Rect::from_center_size(
+                        pos2(
+                            head.right() - 10.0 - clear_galley.size().x / 2.0,
+                            head.center().y,
+                        ),
+                        clear_galley.size() + vec2(12.0, 8.0),
+                    );
+                    let clear_response =
+                        ui.interact(clear, Id::new("recent-clear"), Sense::click());
+                    if clear_response.hovered() {
+                        ui.painter()
+                            .rect_filled(clear, CornerRadius::same(6), p.surface_hover);
+                    }
+                    ui.painter().galley(
+                        clear.center() - clear_galley.size() / 2.0,
+                        clear_galley,
+                        p.secondary,
+                    );
+                    // Pressed, not clicked: the field loses focus on release.
+                    if named(clear_response, "Clear recent searches")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .is_pointer_button_down_on()
+                    {
+                        actions.push(Action::ClearSearches);
+                    }
+                    for query in app.recent_searches.iter().take(crate::searches::KEEP) {
+                        let (row, r) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+                        if r.hovered() {
+                            ui.painter()
+                                .rect_filled(row, CornerRadius::same(6), p.surface_hover);
+                        }
+                        Icon::History.image(p.dim, 16.0).paint_at(
+                            ui,
+                            Rect::from_min_size(
+                                pos2(row.left() + 10.0, row.center().y - 8.0),
+                                Vec2::splat(16.0),
+                            ),
+                        );
+                        ui.painter().text(
+                            pos2(row.left() + 36.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            query,
+                            font(Weight::Regular, 14.0),
+                            p.text,
+                        );
+                        let remove = Rect::from_center_size(
+                            pos2(row.right() - 20.0, row.center().y),
+                            Vec2::splat(28.0),
+                        );
+                        let gone =
+                            ui.interact(remove, Id::new(("recent-remove", query)), Sense::click());
+                        if gone.hovered() {
+                            ui.painter()
+                                .circle_filled(remove.center(), 14.0, p.surface_active);
+                        }
+                        Icon::Close.image(p.secondary, 14.0).paint_at(
+                            ui,
+                            Rect::from_center_size(remove.center(), Vec2::splat(14.0)),
+                        );
+                        if named(r, query)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .is_pointer_button_down_on()
+                        {
+                            actions.push(Action::Search(query.clone()));
+                        }
+                        if named(gone, &format!("Remove {query}"))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Remove")
+                            .is_pointer_button_down_on()
+                        {
+                            actions.push(Action::ForgetSearch(query.clone()));
+                            ui.data_mut(|d| d.insert_temp(refocus, true));
+                        }
+                    }
+                });
+        });
 }
 
 pub(super) fn account(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {

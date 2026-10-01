@@ -3,6 +3,7 @@
 //! Views read [`App`] and push [`Action`]s.
 
 mod chrome;
+mod lyrics;
 mod now_playing;
 mod pages;
 mod player;

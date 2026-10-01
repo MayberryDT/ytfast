@@ -73,6 +73,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "offline" => no_connection(),
         "theme" => theme(),
         "showcase" => showcase(),
+        "pages" => pages(),
         _ => journey(),
     }
 }
@@ -327,10 +328,7 @@ fn showcase() -> Vec<Step> {
         Step::Screenshot("now-playing"),
         click("LYRICS"),
         wait("lyrics", 30.0, |a| {
-            a.playback
-                .lyrics
-                .as_ref()
-                .is_some_and(|id| matches!(a.lyrics.get(id), Some(Ok(Some(_)))))
+            matches!(a.current_lyrics(), Some(Ok(Some(_))))
         }),
         Step::Sleep(2.0),
         Step::Screenshot("lyrics"),
@@ -611,20 +609,7 @@ fn journey() -> Vec<Step> {
         click("LYRICS"),
         Step::Sleep(4.0),
         Step::Screenshot("05-lyrics"),
-        measure("lyrics", |a| {
-            json!(
-                a.playback
-                    .lyrics
-                    .as_ref()
-                    .map(|id| match a.lyrics.get(id) {
-                        Some(Ok(Some(_))) => "shown",
-                        Some(Ok(None)) => "none",
-                        Some(Err(_)) => "error",
-                        None => "loading",
-                    })
-                    .unwrap_or("not offered")
-            )
-        }),
+        measure("lyrics", |a| json!(lyrics_state(a))),
         click("RELATED"),
         wait("related", 30.0, |a| {
             a.playback
@@ -730,6 +715,396 @@ fn journey() -> Vec<Step> {
             }
         }),
     ]
+}
+
+/// How far the playing song's lyrics have come: timed, plain, none, error or loading.
+fn lyrics_state(app: &App) -> &'static str {
+    match app.current_lyrics() {
+        Some(Ok(Some(l))) if !l.lines.is_empty() => "timed",
+        Some(Ok(Some(_))) => "plain",
+        Some(Ok(None)) => "none",
+        Some(Err(_)) => "error",
+        None => "loading",
+    }
+}
+
+fn timed_lines(app: &App) -> Option<&[crate::model::LyricLine]> {
+    match app.current_lyrics() {
+        Some(Ok(Some(l))) if !l.lines.is_empty() => Some(&l.lines),
+        _ => None,
+    }
+}
+
+/// The lyric line lit now, as the Lyrics tab draws it.
+fn lyric_index(app: &App) -> Option<usize> {
+    crate::lyrics::current_line(timed_lines(app)?, app.position_now())
+}
+
+/// The playing cover's colours are worked out (not the previous song's).
+fn cover_colours_ready(app: &App) -> bool {
+    let cover = app.current_track().and_then(|t| t.thumbnail.as_deref());
+    cover.is_some() && app.cover_url.as_deref() == cover
+}
+
+/// The cover's extracted colours and what Now Playing makes of them under
+/// the current theme, with contrast ratios against the wash's two ends.
+fn cover_record(app: &App) -> Value {
+    let hex = |c: egui::Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+    let wash = crate::colors::Wash::new(app.cover_colors.as_ref(), &app.palette);
+    let worst = |c: egui::Color32| {
+        crate::colors::contrast(c, wash.top).min(crate::colors::contrast(c, wash.bottom))
+    };
+    let track = app.current_track();
+    json!({
+        "video_id": track.map(|t| t.video_id.clone()),
+        "title": track.map(|t| t.title.clone()),
+        "theme_dark": app.palette.dark,
+        "deep": app.cover_colors.map(|c| hex(c.deep)),
+        "accent": app.cover_colors.map(|c| hex(c.accent)),
+        "neutral": app.cover_colors.map(|c| c.neutral),
+        "wash_top": hex(wash.top),
+        "wash_bottom": hex(wash.bottom),
+        "text": hex(wash.text),
+        "accent_shown": hex(wash.accent),
+        "contrast_text": worst(wash.text),
+        "contrast_secondary": worst(wash.secondary),
+        "contrast_accent": worst(wash.accent),
+    })
+}
+
+fn page_of<'a>(app: &'a App, target: &Target) -> Option<&'a crate::model::Page> {
+    app.page_state(target)?.page.as_ref()
+}
+
+/// A Home mood (Energize, Relax…) is open and loaded, its chip selected.
+fn mood_open(app: &App) -> bool {
+    matches!(&app.view, View::Page(Target::Browse { id, params: Some(_) }) if id == "FEmusic_home")
+        && current_loaded(app)
+        && page_of(app, &app.view.target()).is_some_and(|p| p.chips.iter().any(|c| c.selected))
+}
+
+/// The first song on the current page whose title contains `want` (any
+/// song if none does).
+fn song_on_page(app: &App, want: &str) -> Option<crate::model::Track> {
+    let page = page_of(app, &app.view.target())?;
+    let songs: Vec<&crate::model::Track> = page
+        .shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter(|i| i.kind == crate::model::ItemKind::Song)
+        .filter_map(|i| i.track.as_ref())
+        .collect();
+    songs
+        .iter()
+        .find(|t| t.title.contains(want))
+        .or(songs.first())
+        .map(|t| (*t).clone())
+}
+
+fn searched(app: &App) -> bool {
+    matches!(&app.view, View::Page(Target::Search { .. })) && current_loaded(app)
+}
+
+/// Now Playing and pages (docs/SPEC.md § Now Playing and pages): Home's mood
+/// chips, Library → History, an artist's See all, recent searches, the cover
+/// wash for two different covers under the current and a light theme, timed
+/// lyrics following the song and seeking by line, and a song without timed
+/// lyrics. Restores the theme and the recent searches it found.
+fn pages() -> Vec<Step> {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    let home = View::Home.target();
+    let original = omarchy_theme().unwrap_or_else(|| "Permafrost".into());
+    let light = std::env::var("YTFAST_E2E_LIGHT_THEME").unwrap_or_else(|_| "Snow".into());
+    let saved: Rc<RefCell<Vec<String>>> = Rc::default();
+    let song_a: Rc<RefCell<Option<crate::model::Track>>> = Rc::default();
+    let song_b: Rc<RefCell<Option<crate::model::Track>>> = Rc::default();
+    let first_line: Rc<Cell<Option<usize>>> = Rc::default();
+    let jump: Rc<Cell<f64>> = Rc::default();
+    let (saved_1, saved_2) = (saved.clone(), saved);
+    let (a1, a2, a3, a4) = (song_a.clone(), song_a.clone(), song_a.clone(), song_a);
+    let (b1, b2, b3, b4) = (song_b.clone(), song_b.clone(), song_b.clone(), song_b);
+    let (l1, l2) = (first_line.clone(), first_line);
+    let (j1, j2, j3) = (jump.clone(), jump.clone(), jump);
+    let clear_search = || run("clear the search field", |a| a.search.clear());
+    let search = |query: &str| {
+        vec![
+            clear_search(),
+            click("Search"),
+            Step::Type(query.into()),
+            Step::Key(egui::Key::Enter),
+            wait("search results", 60.0, searched),
+        ]
+    };
+    let mut steps = vec![
+        wait("signed in", 60.0, |a| {
+            matches!(a.account, Account::SignedIn { .. })
+        }),
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 2)),
+        run("note the recent searches", move |a| {
+            *saved_1.borrow_mut() = a.recent_searches.clone();
+        }),
+        // Home's mood chips: one chosen, then chosen again to go back.
+        wait("home mood chips", 30.0, |a| {
+            page_of(a, &View::Home.target()).is_some_and(|p| p.chips.len() >= 3)
+        }),
+        measure("home_chips", |a| {
+            json!(
+                page_of(a, &View::Home.target()).map(|p| p
+                    .chips
+                    .iter()
+                    .map(|c| c.text.clone())
+                    .collect::<Vec<_>>())
+            )
+        }),
+        Step::Sleep(2.0),
+        Step::Screenshot("p01-home-chips"),
+        click_with("a mood chip", |a| {
+            page_of(a, &View::Home.target())?
+                .chips
+                .iter()
+                .find(|c| !c.selected && c.target.is_some() && c.text != "Podcasts")
+                .map(|c| c.text.clone())
+        }),
+        wait("mood page", 60.0, mood_open),
+        Step::Sleep(3.0),
+        Step::Screenshot("p02-mood"),
+        measure("mood", |a| {
+            let page = page_of(a, &a.view.target());
+            json!({
+                "selected": page.and_then(|p| p.chips.iter().find(|c| c.selected)).map(|c| c.text.clone()),
+                "shelves": page.map(|p| p.shelves.iter().map(|s| s.title.clone()).collect::<Vec<_>>()),
+            })
+        }),
+        click_with("the selected mood chip", |a| {
+            page_of(a, &a.view.target())?
+                .chips
+                .iter()
+                .find(|c| c.selected)
+                .map(|c| c.text.clone())
+        }),
+        wait("back on Home", 30.0, |a| a.view == View::Home),
+        Step::Sleep(2.0),
+        Step::Screenshot("p03-home-again"),
+        // Library → History, with day headings.
+        click("Library"),
+        wait("library", 60.0, current_loaded),
+        click("History"),
+        wait("history", 60.0, |a| {
+            a.view == View::Library(LibraryTab::History) && current_loaded(a)
+        }),
+        Step::Sleep(3.0),
+        Step::Screenshot("p04-history"),
+        measure("history_days", |a| {
+            json!(page_of(a, &a.view.target()).map(|p| {
+                p.shelves
+                    .iter()
+                    .map(|s| json!({"heading": s.title, "rows": s.items.len()}))
+                    .collect::<Vec<_>>()
+            }))
+        }),
+    ];
+    // An artist's See all (Albums), from the first search.
+    steps.extend(search("Coldplay"));
+    steps.extend([
+        run("note song A", move |a| *a1.borrow_mut() = song_on_page(a, "Yellow")),
+        run("open the artist", |a| {
+            let artist = |i: &crate::model::Item| i.kind == crate::model::ItemKind::Artist;
+            if !open_item(a, |i| artist(i) && i.title == "Coldplay") {
+                open_item(a, artist);
+            }
+        }),
+        wait("artist page", 60.0, artist_or_album),
+        Step::Sleep(3.0),
+        Step::Screenshot("p05-artist"),
+        measure("artist_see_all", |a| {
+            json!(page_of(a, &a.view.target()).map(|p| p
+                .shelves
+                .iter()
+                .filter(|s| s.more.is_some())
+                .map(|s| s.title.clone())
+                .collect::<Vec<_>>()))
+        }),
+        // As its More button does (the shelf may be below the fold).
+        run("open the Albums shelf's See all", |a| {
+            let more = page_of(a, &a.view.target()).and_then(|p| {
+                p.shelves
+                    .iter()
+                    .find(|s| s.title == "Albums" && s.more.is_some())
+                    .or_else(|| p.shelves.iter().find(|s| s.more.is_some()))
+                    .and_then(|s| s.more.clone())
+            });
+            if let Some(target) = more {
+                a.open(View::Page(target));
+            }
+        }),
+        wait("See all grid", 60.0, |a| {
+            current_loaded(a)
+                && page_of(a, &a.view.target()).is_some_and(|p| {
+                    p.shelves
+                        .iter()
+                        .any(|s| s.style == crate::model::ShelfStyle::Grid)
+                })
+        }),
+        Step::Sleep(3.0),
+        Step::Screenshot("p06-see-all-albums"),
+        measure("see_all", |a| {
+            let page = page_of(a, &a.view.target());
+            json!({
+                "title": page.and_then(|p| p.header.as_ref()).map(|h| h.title.clone()),
+                "chips": page.map(|p| p.chips.iter().map(|c| (c.text.clone(), c.selected)).collect::<Vec<_>>()),
+                "cards": page.map(|p| p.shelves.iter().filter(|s| s.style == crate::model::ShelfStyle::Grid).map(|s| s.items.len()).sum::<usize>()),
+            })
+        }),
+    ]);
+    steps.extend(search("Daft Punk Get Lucky"));
+    steps.extend([
+        run("note song B", move |a| {
+            *b1.borrow_mut() = song_on_page(a, "Get Lucky")
+        }),
+        // Recent searches: the field focused and empty.
+        clear_search(),
+        click("Search"),
+        Step::Sleep(1.0),
+        Step::Screenshot("p07-recent-searches"),
+        measure("recent_searches", |a| {
+            json!(a.recent_searches.iter().take(5).collect::<Vec<_>>())
+        }),
+        Step::Key(egui::Key::Escape),
+        // Two songs with different covers.
+        run("play songs A and B", move |a| {
+            let tracks: Vec<_> = [a2.borrow().clone(), b2.borrow().clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            a.backend.send(Command::PlayTracks { tracks, start: 0 });
+        }),
+        wait("song A playing", 90.0, |a| {
+            a.playback.index == Some(0) && a.playback.playing && a.playback.position > 0.5
+        }),
+        click("Open player"),
+        wait("now playing", 10.0, |a| a.now_playing),
+        wait("cover A colours", 30.0, cover_colours_ready),
+        Step::Sleep(1.5),
+        Step::Screenshot("p08-now-playing-a"),
+        measure("cover_a", cover_record),
+        click_with("song B in Up next", move |_| {
+            b3.borrow().as_ref().map(|t| t.title.clone())
+        }),
+        wait("song B playing", 90.0, |a| {
+            a.playback.index == Some(1) && a.playback.playing && a.playback.position > 0.5
+        }),
+        wait("cover B colours", 30.0, cover_colours_ready),
+        Step::Sleep(1.5),
+        Step::Screenshot("p09-now-playing-b"),
+        measure("cover_b", cover_record),
+        // Timed lyrics follow the song.
+        click("LYRICS"),
+        wait("timed lyrics", 45.0, |a| timed_lines(a).is_some()),
+        measure("lyrics", |a| {
+            json!({
+                "state": lyrics_state(a),
+                "source": match a.current_lyrics() {
+                    Some(Ok(Some(l))) => l.source.clone(),
+                    _ => None,
+                },
+                "lines": timed_lines(a).map(<[_]>::len),
+            })
+        }),
+        run("seek to a minute in", |a| a.backend.send(Command::Seek(60.0))),
+        wait("at a minute", 15.0, |a| {
+            a.playback.position >= 60.0 && a.playback.position < 75.0 && a.playback.playing
+        }),
+        Step::Sleep(2.0),
+        measure("line_first", move |a| {
+            l1.set(lyric_index(a));
+            json!({"index": lyric_index(a), "position": a.position_now()})
+        }),
+        Step::Sleep(10.0),
+        measure("line_second", |a| {
+            json!({"index": lyric_index(a), "position": a.position_now()})
+        }),
+        wait("the lit line moved on", 5.0, move |a| {
+            matches!((l2.get(), lyric_index(a)), (Some(first), Some(now)) if now > first)
+        }),
+        Step::Screenshot("p10-lyrics-timed"),
+        click_with("a later lyric line", move |a| {
+            let lines = timed_lines(a)?;
+            let now = lyric_index(a)?;
+            let pick = (now + 3..(now + 8).min(lines.len())).find(|&j| {
+                let text = &lines[j].text;
+                !text.is_empty() && lines.iter().filter(|l| l.text == *text).count() == 1
+            })?;
+            j1.set(lines[pick].start);
+            Some(lines[pick].text.clone())
+        }),
+        wait("seeked to the line", 10.0, move |a| {
+            let start = j2.get();
+            a.playback.position >= start - 0.5 && a.playback.position < start + 3.0
+        }),
+        measure("after_line_click", move |a| {
+            json!({"line_start": j3.get(), "position": a.playback.position, "index": lyric_index(a)})
+        }),
+        // The same under a light theme.
+        run("switch to a light theme", move |_| set_theme(&light)),
+        wait("light colours", 120.0, |a| !a.palette.dark),
+        Step::Sleep(3.0),
+        Step::Screenshot("p11-lyrics-light"),
+        click("UP NEXT"),
+        Step::Sleep(1.0),
+        Step::Screenshot("p12-now-playing-b-light"),
+        measure("cover_b_light", cover_record),
+        click_with("song A in Up next", move |_| {
+            a3.borrow().as_ref().map(|t| t.title.clone())
+        }),
+        wait("song A again", 90.0, |a| {
+            a.playback.index == Some(0) && a.playback.playing && a.playback.position > 0.5
+        }),
+        wait("cover A colours again", 30.0, cover_colours_ready),
+        Step::Sleep(1.5),
+        Step::Screenshot("p13-now-playing-a-light"),
+        measure("cover_a_light", cover_record),
+        run("switch the theme back", move |_| set_theme(&original)),
+        wait("dark colours", 120.0, |a| a.palette.dark),
+        Step::Sleep(2.0),
+        click("Close player"),
+    ]);
+    // A song without timed lyrics: plain lyrics, or the message.
+    steps.extend(search("Debussy Clair de Lune"));
+    steps.extend([
+        click_with("a song", |a| song_on_page(a, "Clair de Lune").map(|t| t.title)),
+        wait("another song playing", 90.0, move |a| {
+            let id = a.current_track().map(|t| t.video_id.clone());
+            let ours = |s: &Rc<RefCell<Option<crate::model::Track>>>| {
+                s.borrow().as_ref().map(|t| t.video_id.clone())
+            };
+            id.is_some()
+                && id != ours(&a4)
+                && id != ours(&b4)
+                && a.playback.playing
+                && a.playback.position > 0.5
+        }),
+        click("Open player"),
+        click("LYRICS"),
+        wait("lyrics answered", 45.0, |a| lyrics_state(a) != "loading"),
+        Step::Sleep(2.0),
+        Step::Screenshot("p14-untimed-lyrics"),
+        measure("untimed_lyrics", |a| {
+            json!({"title": a.current_track().map(|t| t.title.clone()), "state": lyrics_state(a)})
+        }),
+        click("Close player"),
+        run("restore the recent searches", move |a| {
+            a.recent_searches = saved_2.borrow().clone();
+            a.backend
+                .send(Command::SaveSearches(a.recent_searches.clone()));
+        }),
+        run("pause", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+    ]);
+    steps
 }
 
 enum Phase {

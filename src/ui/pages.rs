@@ -3,7 +3,7 @@ use super::widgets::{chip, cover, font, label, pill, resting, runs_line};
 use super::{CARD, GAP};
 use crate::app::{Action, App, LibraryTab, PageState, View};
 use crate::icons::Icon;
-use crate::model::{Header, Page, Target, Track};
+use crate::model::{Chip, Header, Page, Target, Track};
 use crate::theme::Palette;
 use egui::{CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense, Ui, Vec2, pos2, vec2};
 use fastframe_fonts::Weight;
@@ -137,16 +137,19 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
     }
     if !page.chips.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            for c in &page.chips {
-                if chip(ui, &c.text, c.selected, p).clicked()
-                    && let Some(target) = &c.target
-                {
-                    actions.push(Action::Activate(target.clone()));
+            for (i, c) in page.chips.iter().enumerate() {
+                if chip(ui, &c.text, c.selected, p).clicked() {
+                    chip_chosen(c, i, key, actions);
                 }
                 ui.add_space(4.0);
             }
         });
         ui.add_space(20.0);
+    }
+    if state.more_loading.contains(&None) && page.continuation.is_none() {
+        // A chip is swapping the shelves in place.
+        ui.add(egui::Spinner::new().size(20.0).color(p.secondary));
+        ui.add_space(12.0);
     }
     if page.shelves.is_empty() {
         let message = page
@@ -165,6 +168,28 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
     }
     if state.more_loading.contains(&None) {
         skeleton_shelf(ui, p);
+    }
+}
+
+/// A chip chosen. A selected one goes back where it came from (a Home mood
+/// back to Home); another opens its page or swaps the shelves in place.
+fn chip_chosen(c: &Chip, i: usize, key: &str, actions: &mut Vec<Action>) {
+    if c.selected {
+        match &c.deselect {
+            Some(Target::Browse { id, .. }) if id == "FEmusic_home" => {
+                actions.push(Action::Open(View::Home));
+            }
+            Some(target) => actions.push(Action::Activate(target.clone())),
+            None => {}
+        }
+    } else if let Some(token) = &c.reload {
+        actions.push(Action::ReloadChip {
+            key: key.to_owned(),
+            chip: i,
+            token: token.clone(),
+        });
+    } else if let Some(target) = &c.target {
+        actions.push(Action::Activate(target.clone()));
     }
 }
 

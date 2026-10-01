@@ -151,6 +151,34 @@ impl Client {
         self.call("browse", body).await
     }
 
+    /// A lyrics page (`MPLY…`) as the Android Music app sees it, which has
+    /// the timed lines. Sent without the session: with it YouTube answers 400.
+    pub async fn timed_lyrics(&self, browse_id: &str) -> Result<Value> {
+        let body = json!({
+            "browseId": browse_id,
+            "context": {"client": {"clientName": "ANDROID_MUSIC", "clientVersion": "7.21.50", "hl": "en", "gl": "US"}},
+        });
+        let response = self
+            .http
+            .post(format!("{ORIGIN}/youtubei/v1/browse?prettyPrint=false"))
+            .header("Content-Type", "application/json")
+            .header(
+                "User-Agent",
+                "com.google.android.apps.youtube.music/7.21.50 (Linux; U; Android 14) gzip",
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(offline)?;
+        if !response.status().is_success() {
+            return Err(ApiError::Http(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::Invalid(e.to_string()))
+    }
+
     pub async fn continuation(&self, token: &str) -> Result<Value> {
         self.call("browse", json!({ "continuation": token })).await
     }

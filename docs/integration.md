@@ -31,6 +31,9 @@ Read this before touching sign-in, playback or the build. Update it when a fact 
 - **Offline:** a song that fails twice is skipped only if YouTube is reachable; otherwise playback waits on it and resumes when a reachability check succeeds.
 - **History:** after 10 s of play, `WEB_REMIX` `player` (with cookies) → GET `playbackTracking.videostatsPlaybackUrl.baseUrl&ver=2&c=WEB_REMIX&cpn=<16 random>` with the same auth headers.
 - **Theme:** `fastframe_theme::Catalog` with `DesktopThemes { slug: "ytfast", omarchy_template: BASE_TEMPLATE, presets: false }`. It renders Omarchy's current colours itself and watches for changes, so no hook install is needed. `ytfast reload-themes` exists for a hook.
+- **Lyrics (`src/lyrics.rs`):** for the playing song, YouTube Music's timed lyrics (`ANDROID_MUSIC` browse of the `MPLY…` id, no session), else LRCLIB's synced lyrics (`/api/get` by title, first artist, album and length; else `/api/search` with the closest length within ±3 s; `User-Agent: ytfast/<version> (<repo>)`), else YouTube Music's plain lyrics, else LRCLIB's plain ones. Asked for as soon as watch-next names the lyrics page, or 3 s into a song without one. The Lyrics tab highlights by the playback position moved on between backend updates.
+- **Cover colour (`src/colors.rs`):** Now Playing alone takes colour from the cover. The bytes the cover loader holds are decoded on the backend runtime (`spawn_blocking`), reduced to 48 px and read in OKLab: the dominant hue's mean colour (deep tone) and the most vivid hue (accent); covers with under 6% coloured pixels count as neutral. The wash is a vertical blend in the cover's hue at a lightness set by the theme (dark or light), with 18% of the theme's window mixed in; text, secondary, dim and accent are the theme's (or the cover's accent) moved in lightness to contrast ratios of 7, 4.5, 3 and 4.5 against both ends. Song changes fade over 400 ms. `App::cover_colors` holds the extracted colours for Stage.
+- **Recent searches:** the last 20 queries, newest first, in `~/.cache/ytfast/searches.json`, read and written (temporary file, then rename) on the backend runtime.
 - **egui:** egui 0.36 on the crmne fork uses `App::ui(&mut self, ui, frame)` and an optional `App::logic`, not `update`.
 
 ## Build
@@ -45,11 +48,12 @@ A release build from clean takes about 5 minutes on a 4-core desktop CPU and a f
 
 ## E2E runs
 
-`scripts/e2e.sh [journey|recovery|offline|theme|showcase]` builds with the `e2e` feature and runs the real app on the desktop with the real account, network, yt-dlp and mpv. `src/e2e.rs` clicks controls by their accessible names (`ui::named`) with synthetic pointer events through egui's own input pipeline, types, presses keys, takes framebuffer screenshots and records measurements. It writes `artifacts/e2e/<UTC>-<scenario>/` (gitignored: account data).
+`scripts/e2e.sh [journey|recovery|offline|theme|showcase|pages]` builds with the `e2e` feature and runs the real app on the desktop with the real account, network, yt-dlp and mpv. `src/e2e.rs` clicks controls by their accessible names (`ui::named`) with synthetic pointer events through egui's own input pipeline, types, presses keys, takes framebuffer screenshots and records measurements. It writes `artifacts/e2e/<UTC>-<scenario>/` (gitignored: account data).
 
 - Test-only hooks exist in e2e builds only: `sabotaged(video_id)` hands the resolver an unreachable URL, and `offline()` makes the resolver fail and `Client::reachable` report false.
 - `recovery` runs with a stand-in `HOME` holding a copy of a browser profile whose session cookies were overwritten (an expired sign-in). Its reconnect step swaps in a symlink to the real profile.
 - `offline` points every request at a dead proxy (`HTTPS_PROXY=http://127.0.0.1:9`).
-- `theme` and `showcase` switch the Omarchy theme to `YTFAST_E2E_LIGHT_THEME` (default "Snow") and back.
+- `theme`, `showcase` and `pages` switch the Omarchy theme to `YTFAST_E2E_LIGHT_THEME` (default "Snow") and back.
+- `pages` plays songs (they enter the account's history like any play) and puts its recent searches back as it found them.
 - `showcase` runs with an empty stand-in `HOME` (the real Omarchy theme linked in), so it is signed out and its screenshots hold no account data. The README's pictures come from it.
 - Never run two scenarios at once: each stops any running ytfast.
