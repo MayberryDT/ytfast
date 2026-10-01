@@ -655,6 +655,18 @@ fn chips(v: Option<&Value>) -> Vec<Chip> {
                     .get("isSelected")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                deselect: c.get("onDeselectedCommand").and_then(endpoint),
+                reload: str_at(
+                    c,
+                    &[
+                        "navigationEndpoint",
+                        "browseSectionListReloadEndpoint",
+                        "continuation",
+                        "reloadContinuationData",
+                        "continuation",
+                    ],
+                )
+                .map(str::to_owned),
             })
         })
         .filter(|c| !c.text.is_empty())
@@ -984,6 +996,7 @@ pub fn lyrics(v: &Value) -> Option<Lyrics> {
     (!body.is_empty()).then(|| Lyrics {
         text: body,
         source: Some(text(shelf.get("footer"))).filter(|s| !s.is_empty()),
+        lines: Vec::new(),
     })
 }
 

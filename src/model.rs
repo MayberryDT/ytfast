@@ -138,6 +138,13 @@ pub struct Chip {
     pub text: String,
     pub target: Option<Target>,
     pub selected: bool,
+    /// What choosing a selected chip again does (a Home mood back to Home).
+    #[serde(default)]
+    pub deselect: Option<Target>,
+    /// A chip that swaps the page's shelves in place (an artist's
+    /// discography: Albums, Singles & EPs): the continuation to load.
+    #[serde(default)]
+    pub reload: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -189,6 +196,16 @@ pub struct WatchNext {
 pub struct Lyrics {
     pub text: String,
     pub source: Option<String>,
+    /// Timed lines, earliest first; empty when only plain lyrics exist.
+    pub lines: Vec<LyricLine>,
+}
+
+/// One timed line of lyrics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LyricLine {
+    /// When the line starts, in seconds into the song.
+    pub start: f64,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

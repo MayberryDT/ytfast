@@ -18,14 +18,17 @@ pub enum LibraryTab {
     Songs,
     Albums,
     Artists,
+    /// What the account played, by day.
+    History,
 }
 
 impl LibraryTab {
-    pub const ALL: [LibraryTab; 4] = [
+    pub const ALL: [LibraryTab; 5] = [
         LibraryTab::Playlists,
         LibraryTab::Songs,
         LibraryTab::Albums,
         LibraryTab::Artists,
+        LibraryTab::History,
     ];
 
     pub fn label(self) -> &'static str {
@@ -34,6 +37,7 @@ impl LibraryTab {
             LibraryTab::Songs => "Songs",
             LibraryTab::Albums => "Albums",
             LibraryTab::Artists => "Artists",
+            LibraryTab::History => "History",
         }
     }
 
@@ -43,6 +47,7 @@ impl LibraryTab {
             LibraryTab::Songs => "FEmusic_liked_videos",
             LibraryTab::Albums => "FEmusic_liked_albums",
             LibraryTab::Artists => "FEmusic_library_corpus_track_artists",
+            LibraryTab::History => "FEmusic_history",
         })
     }
 }
@@ -97,6 +102,8 @@ pub struct PageState {
     pub fetched: Option<Instant>,
     /// The newest request for this page; older answers are ignored.
     seq: u64,
+    /// A chip's in-place reload in flight: its continuation and chip index.
+    reload: Option<(String, usize)>,
 }
 
 pub enum Action {
@@ -121,9 +128,19 @@ pub enum Action {
     Retry(String),
     /// Fetch a page without opening it (Now Playing's Related tab).
     Load(Target),
+    /// Lyrics for the song with this video id.
     Lyrics(String),
-    /// Forget a failed lyrics fetch so it is asked for again.
+    /// Forget a failed lyrics fetch (by video id) so it is asked for again.
     RetryLyrics(String),
+    /// Drop one recent search.
+    ForgetSearch(String),
+    ClearSearches,
+    /// A chip that swaps page `key`'s shelves in place (`Chip::reload`).
+    ReloadChip {
+        key: String,
+        chip: usize,
+        token: String,
+    },
     DismissError(usize),
     Copy(String),
     /// The pointer rests on a song: resolve it ahead of a likely click.
@@ -156,6 +173,18 @@ pub struct App {
     pub now_playing_tab: NowPlayingTab,
     pub lyrics: HashMap<String, Result<Option<Lyrics>, String>>,
     lyrics_requested: HashSet<String>,
+    /// When `playback` last arrived, to move the position on between updates.
+    playback_at: Instant,
+    /// Recent searches, newest first.
+    pub recent_searches: Vec<String>,
+    /// The playing song's cover colours (for Now Playing and Stage), `None`
+    /// until worked out or when the cover has none.
+    pub cover_colors: Option<crate::colors::CoverColors>,
+    cover_extractor: crate::colors::Extractor,
+    /// Now Playing's move from the previous cover's colours.
+    pub cover_fade: crate::colors::Fade,
+    /// The cover `cover_colors` were taken from.
+    pub cover_url: Option<String>,
     last_prepared: Option<String>,
     page_seq: u64,
     pub errors: Vec<String>,
@@ -224,6 +253,12 @@ impl App {
             now_playing_tab: NowPlayingTab::default(),
             lyrics: HashMap::new(),
             lyrics_requested: HashSet::new(),
+            playback_at: Instant::now(),
+            recent_searches: Vec::new(),
+            cover_colors: None,
+            cover_extractor: crate::colors::Extractor::default(),
+            cover_fade: crate::colors::Fade::default(),
+            cover_url: None,
             last_prepared: None,
             page_seq: 0,
             errors: Vec::new(),
@@ -237,6 +272,7 @@ impl App {
         app.start_themes(ctx);
         app.ensure_page(View::Home.target(), false);
         app.ensure_page(LibraryTab::Playlists.target(), false);
+        app.backend.send(Command::LoadSearches);
         app
     }
 
@@ -281,9 +317,11 @@ impl App {
             more_loading: HashSet::new(),
             fetched: None,
             seq,
+            reload: None,
         });
         state.loading = true;
         state.error = None;
+        state.reload = None;
         state.seq = seq;
         self.backend.send(Command::Page { target, seq });
     }
@@ -348,6 +386,23 @@ impl App {
                 let Some(page) = state.page.as_mut() else {
                     return;
                 };
+                // A chip's in-place reload (an artist's Albums / Singles & EPs).
+                if shelf.is_none() && state.reload.as_ref().is_some_and(|(t, _)| *t == token) {
+                    let chip = state.reload.take().map_or(0, |(_, chip)| chip);
+                    state.more_loading.remove(&None);
+                    match result {
+                        Ok(More::Shelves { shelves, next }) => {
+                            page.shelves = shelves;
+                            page.continuation = next;
+                            for (i, c) in page.chips.iter_mut().enumerate() {
+                                c.selected = i == chip;
+                            }
+                        }
+                        Ok(More::Items { .. }) => {}
+                        Err(error) => self.push_error(format!("Couldn't load that: {error}")),
+                    }
+                    return;
+                }
                 // Only the answer to the token still on the page applies; a
                 // refreshed page has its own.
                 let slot = match shelf {
@@ -391,7 +446,23 @@ impl App {
                 self.lyrics.insert(id, result);
             }
             Event::Queue(queue) => self.queue = queue,
-            Event::Playback(playback) => self.playback = playback,
+            Event::Playback(playback) => {
+                self.playback = playback;
+                self.playback_at = Instant::now();
+            }
+            Event::Searches(saved) => {
+                // Searches made before the saved list arrived stay first.
+                for query in saved {
+                    if !self
+                        .recent_searches
+                        .iter()
+                        .any(|q| q.eq_ignore_ascii_case(&query))
+                    {
+                        self.recent_searches.push(query);
+                    }
+                }
+                self.recent_searches.truncate(crate::searches::KEEP);
+            }
             Event::Error(error) => self.push_error(error),
             Event::Profiles { list, current } => {
                 self.profiles = list;
@@ -463,6 +534,8 @@ impl App {
                 if !query.is_empty() {
                     self.search = query.clone();
                     self.suggestions.clear();
+                    crate::searches::remember(&mut self.recent_searches, &query);
+                    self.save_searches();
                     self.open(View::Page(Target::Search {
                         query,
                         params: None,
@@ -497,9 +570,27 @@ impl App {
                 self.lyrics.remove(&id);
                 self.lyrics_requested.remove(&id);
             }
-            Action::Lyrics(id) => {
-                if self.lyrics_requested.insert(id.clone()) {
-                    self.backend.send(Command::Lyrics(id));
+            Action::Lyrics(id) => self.request_lyrics(&id),
+            Action::ForgetSearch(query) => {
+                self.recent_searches.retain(|q| *q != query);
+                self.save_searches();
+            }
+            Action::ClearSearches => {
+                self.recent_searches.clear();
+                self.save_searches();
+            }
+            Action::ReloadChip { key, chip, token } => {
+                if let Some(state) = self.pages.get_mut(&key)
+                    && state.page.is_some()
+                {
+                    state.reload = Some((token.clone(), chip));
+                    state.more_loading.insert(None);
+                    self.backend.send(Command::More {
+                        key,
+                        token,
+                        search: false,
+                        shelf: None,
+                    });
                 }
             }
             Action::DismissError(i) => {
@@ -514,6 +605,100 @@ impl App {
                     self.backend.send(Command::Prepare(video_id));
                 }
             }
+        }
+    }
+
+    fn save_searches(&self) {
+        self.backend
+            .send(Command::SaveSearches(self.recent_searches.clone()));
+    }
+
+    /// The song playing (or loading) now.
+    pub fn current_track(&self) -> Option<&Track> {
+        self.playback.index.and_then(|i| self.queue.get(i))
+    }
+
+    /// The playing song's lyrics: `None` until asked for and answered.
+    pub fn current_lyrics(&self) -> Option<&Result<Option<Lyrics>, String>> {
+        self.lyrics.get(&self.current_track()?.video_id)
+    }
+
+    /// The playback position now, moved on from the last backend update
+    /// (which comes at most four times a second) while playing.
+    pub fn position_now(&self) -> f64 {
+        let p = &self.playback;
+        if !p.playing || p.loading {
+            return p.position;
+        }
+        // Past two seconds without an update something is stuck: don't run on.
+        let since = self.playback_at.elapsed().as_secs_f64().min(2.0);
+        let now = p.position + since;
+        if p.duration > 0.0 {
+            now.min(p.duration)
+        } else {
+            now
+        }
+    }
+
+    /// Asks once for the lyrics of the queued song `video_id`.
+    fn request_lyrics(&mut self, video_id: &str) {
+        if self.lyrics_requested.contains(video_id) {
+            return;
+        }
+        let Some(track) = self.queue.iter().find(|t| t.video_id == video_id).cloned() else {
+            return;
+        };
+        let current = self.current_track().map(|t| t.video_id.as_str()) == Some(video_id);
+        let browse_id = current.then(|| self.playback.lyrics.clone()).flatten();
+        let duration = track
+            .duration
+            .map(f64::from)
+            .or(current.then_some(self.playback.duration))
+            .unwrap_or(0.0);
+        self.lyrics_requested.insert(video_id.to_owned());
+        self.backend.send(Command::Lyrics {
+            track,
+            browse_id,
+            duration,
+        });
+    }
+
+    /// Lyrics for the playing song are asked for ahead of the Lyrics tab:
+    /// once YouTube Music has named its lyrics page, or a moment into the
+    /// song if it hasn't (then only LRCLIB may have them).
+    fn lyrics_frame(&mut self) {
+        let Some(track) = self.playback.index.and_then(|i| self.queue.get(i)) else {
+            return;
+        };
+        if !self.lyrics_requested.contains(&track.video_id)
+            && (self.playback.lyrics.is_some() || self.playback.position >= 3.0)
+        {
+            let id = track.video_id.clone();
+            self.request_lyrics(&id);
+        }
+    }
+
+    /// Works out the playing cover's colours off this thread and starts
+    /// Now Playing's move to them when they change.
+    fn cover_frame(&mut self, ctx: &egui::Context) {
+        let Some(url) = self
+            .playback
+            .index
+            .and_then(|i| self.queue.get(i))
+            .and_then(|t| t.thumbnail.as_deref())
+        else {
+            return;
+        };
+        let Some(colors) = self.cover_extractor.get(ctx, &self.backend.runtime, url) else {
+            return;
+        };
+        if colors != self.cover_colors {
+            self.cover_fade
+                .start(self.cover_colors.as_ref(), &self.palette);
+            self.cover_colors = colors;
+        }
+        if self.cover_url.as_deref() != Some(url) {
+            self.cover_url = Some(url.to_owned());
         }
     }
 
@@ -567,6 +752,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         self.theme_frame(&ctx);
+        self.lyrics_frame();
+        self.cover_frame(&ctx);
 
         #[cfg(feature = "e2e")]
         let registry = crate::e2e::take_registry(&ctx);

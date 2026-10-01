@@ -14,6 +14,16 @@ use egui::{
 use fastframe_fonts::Weight;
 
 pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
+    // Now Playing takes its colour from the cover: a wash in the cover's
+    // hue, and text and accent chosen to read on it. It moves to the next
+    // cover's colours when the song changes.
+    let (wash, moving) = app.cover_fade.wash(app.cover_colors.as_ref(), p);
+    wash.paint(ui.painter(), ui.max_rect());
+    if moving {
+        ui.ctx().request_repaint();
+    }
+    let tinted = wash.palette(p);
+    let p = &tinted;
     let area = ui.max_rect().shrink2(vec2(40.0, 24.0));
     let side = 440.0_f32.min(area.width() * 0.45);
     let art_area = Rect::from_min_max(area.min, pos2(area.right() - side - 40.0, area.bottom()));
@@ -81,7 +91,8 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         ] {
             let enabled = match tab {
                 NowPlayingTab::UpNext => true,
-                NowPlayingTab::Lyrics => app.playback.lyrics.is_some(),
+                // LRCLIB may have lyrics where YouTube Music has none.
+                NowPlayingTab::Lyrics => current.is_some(),
                 NowPlayingTab::Related => app.playback.related.is_some(),
             };
             let selected = app.now_playing_tab == tab;
@@ -123,7 +134,7 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
     ui.add_space(8.0);
     match app.now_playing_tab {
         NowPlayingTab::UpNext => up_next(app, ui, p, actions),
-        NowPlayingTab::Lyrics => lyrics(app, ui, p, actions),
+        NowPlayingTab::Lyrics => super::lyrics::lyrics(app, ui, p, actions),
         NowPlayingTab::Related => related(app, ui, p, actions),
     }
 }
@@ -211,67 +222,6 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 }
             }
         });
-}
-
-fn lyrics(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
-    let Some(id) = &app.playback.lyrics else {
-        label(
-            ui,
-            "Lyrics aren't available for this song.",
-            15.0,
-            Weight::Regular,
-            p.secondary,
-        );
-        return;
-    };
-    match app.lyrics.get(id) {
-        None => {
-            actions.push(Action::Lyrics(id.clone()));
-            ui.add(egui::Spinner::new().size(20.0).color(p.secondary));
-        }
-        Some(Err(error)) => {
-            ui.horizontal(|ui| {
-                label(
-                    ui,
-                    format!("Couldn't load the lyrics. {error}"),
-                    14.0,
-                    Weight::Regular,
-                    p.secondary,
-                );
-                if ui.link("Retry").clicked() {
-                    actions.push(Action::RetryLyrics(id.clone()));
-                }
-            });
-        }
-        Some(Ok(None)) => {
-            label(
-                ui,
-                "Lyrics aren't available for this song.",
-                15.0,
-                Weight::Regular,
-                p.secondary,
-            );
-        }
-        Some(Ok(Some(lyrics))) => {
-            ScrollArea::vertical()
-                .id_salt(("lyrics", id))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&lyrics.text)
-                                .font(font(Weight::Medium, 17.0))
-                                .color(p.text),
-                        )
-                        .wrap(),
-                    );
-                    if let Some(source) = &lyrics.source {
-                        ui.add_space(16.0);
-                        label(ui, source, 12.0, Weight::Regular, p.dim);
-                    }
-                });
-        }
-    }
 }
 
 fn related(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {

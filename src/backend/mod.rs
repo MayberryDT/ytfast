@@ -41,7 +41,17 @@ pub enum Command {
         shelf: Option<usize>,
     },
     Suggest(String),
-    Lyrics(String),
+    /// Lyrics for a song (timed when anyone has them). `browse_id` is its
+    /// YouTube Music lyrics page if known; `duration` in seconds, 0 if unknown.
+    Lyrics {
+        track: Track,
+        browse_id: Option<String>,
+        duration: f64,
+    },
+    /// Read the recent searches; answered with [`Event::Searches`].
+    LoadSearches,
+    /// Save the recent searches, newest first.
+    SaveSearches(Vec<String>),
     /// Play `tracks`, starting at `start`, as the queue.
     PlayTracks {
         tracks: Vec<Track>,
@@ -85,10 +95,13 @@ pub enum Event {
         input: String,
         items: Vec<String>,
     },
+    /// Lyrics for the song with video id `id`.
     Lyrics {
         id: String,
         result: Result<Option<Lyrics>, String>,
     },
+    /// The saved recent searches, newest first.
+    Searches(Vec<String>),
     /// The queue in play order.
     Queue(Vec<Track>),
     Playback(Playback),
@@ -343,17 +356,34 @@ impl Worker {
                     }
                 });
             }
-            Command::Lyrics(id) => {
+            Command::Lyrics {
+                track,
+                browse_id,
+                duration,
+            } => {
                 let client = self.client.clone();
                 let sink = self.sink.clone();
                 tokio::spawn(async move {
-                    let result = client
-                        .browse(&id, None)
-                        .await
-                        .map(|v| parse::lyrics(&v))
-                        .map_err(|e| e.to_string());
-                    sink.send(Event::Lyrics { id, result });
+                    let result = crate::lyrics::fetch(&client, &track, browse_id, duration).await;
+                    sink.send(Event::Lyrics {
+                        id: track.video_id,
+                        result,
+                    });
                 });
+            }
+            Command::LoadSearches => {
+                let path = self.paths.searches_file();
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    sink.send(Event::Searches(crate::searches::load(&path).await));
+                });
+            }
+            // Saved in order, here: a later list never lands before an earlier one.
+            Command::SaveSearches(list) => {
+                if let Err(error) = crate::searches::save(&self.paths.searches_file(), &list).await
+                {
+                    log::warn!("saving recent searches: {error}");
+                }
             }
             Command::PlayTracks { tracks, start } => {
                 self.new_epoch();

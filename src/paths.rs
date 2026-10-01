@@ -52,6 +52,10 @@ impl Paths {
     pub fn cover_file(&self, uri: &str) -> PathBuf {
         self.cache.join("covers").join(hash(uri))
     }
+
+    pub fn searches_file(&self) -> PathBuf {
+        self.cache.join("searches.json")
+    }
 }
 
 fn private_dir(dir: &Path) -> Result<()> {

@@ -16,6 +16,7 @@ fastframe_icons::icons! {
         Music => "music",
         Queue => "list-music",
         Radio => "radio",
+        History => "history",
         Play => lucide "play",
         Pause => lucide "pause",
         Search => lucide "search",

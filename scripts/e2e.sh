@@ -3,13 +3,15 @@
 # on this machine's desktop with the signed-in browser session. Run them from
 # the repository, on a machine you don't mind it taking over:
 #
-#   scripts/e2e.sh [journey|recovery|offline|theme|showcase]
+#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|pages]
 #
 #   journey   every surface, playback (Premium, gapless, seek, next), history
 #   recovery  signed out → Reconnect; a stream that fails once, one that keeps failing
 #   offline   no connection: saved copies, offline account state
 #   theme     the Omarchy theme changes while ytfast runs (changes it back)
 #   showcase  README pictures with no account (public YouTube Music)
+#   pages     Now Playing and pages: cover colours (dark and light theme), timed
+#             lyrics, History, Home moods, artist See all, recent searches
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in
