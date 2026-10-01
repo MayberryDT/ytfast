@@ -150,7 +150,7 @@ impl super::Worker {
         if let Some(id) = self.state.audition.as_ref().map(|a| a.video_id.clone()) {
             self.audition_gain(&id).await;
         }
-        if self.appended.is_some() {
+        if self.appended.is_some() || self.decks.cued.is_some() {
             self.drop_appended().await;
             self.prefetch();
         }
