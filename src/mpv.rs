@@ -183,13 +183,21 @@ impl Mpv {
             .map(|_| ())
     }
 
-    /// Loads `url` (`replace` or `append`), with the request headers the
-    /// stream needs.
-    pub async fn load(&self, url: &str, mode: &str, user_agent: Option<&str>) -> Result<i64> {
+    pub async fn get(&self, property: &str) -> Result<Value> {
+        self.command(json!(["get_property", property])).await
+    }
+
+    /// Loads `url` (`replace` or `append`) with per-file options: the
+    /// request headers the stream needs, its loudness gain, a start time.
+    /// mpv applies them when the file starts and restores them when it ends,
+    /// so each holds for its own song, gapless handoff included.
+    pub async fn load(&self, url: &str, mode: &str, options: &[(&str, String)]) -> Result<i64> {
         // mpv's option lists split on commas; `%N%value` quotes a value of N bytes.
-        let options = user_agent
-            .map(|ua| format!("user-agent=%{}%{ua}", ua.len()))
-            .unwrap_or_default();
+        let options = options
+            .iter()
+            .map(|(name, value)| format!("{name}=%{}%{value}", value.len()))
+            .collect::<Vec<_>>()
+            .join(",");
         let data = self
             .command(json!(["loadfile", url, mode, -1, options]))
             .await?;

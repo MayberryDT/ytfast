@@ -11,16 +11,22 @@
 
 mod pages;
 mod playback;
+mod queue;
+mod resume;
 mod session;
+mod sound;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::equalizer::Equalizer;
 use crate::innertube::{ApiError, Client, Stream};
-use crate::model::{Account, Lyrics, Page, Playback, Repeat, Target, Track, WatchNext};
+use crate::model::{Account, Lyrics, Page, Playback, Repeat, Sleep, Target, Track, WatchNext};
 use crate::mpv::{Mpv, MpvEvent};
 use crate::parse::{self, More};
 use crate::paths::Paths;
@@ -60,10 +66,32 @@ pub enum Command {
     /// Jump to a queue position (play order).
     JumpTo(usize),
     Reconnect,
-    /// Resolve a song the pointer rests on, if nothing else is resolving.
+    /// Resolve a song the pointer rests on, ahead of a likely click.
     Prepare(String),
     /// Use this browser profile's YouTube session from now on, and reconnect.
     UseProfile(String),
+    /// Insert songs right after the current one (before earlier additions).
+    PlayNext(Vec<Track>),
+    /// Queue songs after earlier additions, before the rest of the list.
+    AddToQueue(Vec<Track>),
+    /// Remove the song at a queue position (play order); not the current one.
+    RemoveFromQueue(usize),
+    /// Move the song at queue position `from` to `to` (play order; `to`
+    /// counts after it is taken out).
+    MoveInQueue {
+        from: usize,
+        to: usize,
+    },
+    /// Remove every song after the current one.
+    ClearUpcoming,
+    /// Set (`Some`) or cancel the sleep timer.
+    SleepTimer(Option<Sleep>),
+    Equalizer(Equalizer),
+    /// Turn loudness levelling between songs on or off.
+    Normalize(bool),
+    /// Resolve songs likely to be played next (on screen when a page
+    /// loads), most likely first, without delaying playback.
+    PrepareMany(Vec<String>),
 }
 
 pub enum Event {
@@ -119,6 +147,8 @@ pub struct Backend {
     pub events: std::sync::mpsc::Receiver<Event>,
     pub http: reqwest::Client,
     pub runtime: tokio::runtime::Handle,
+    resolver: Arc<Resolver>,
+    shutdown: mpsc::UnboundedSender<std::sync::mpsc::Sender<()>>,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -130,6 +160,7 @@ impl Backend {
             .thread_name("ytfast-io")
             .build()?;
         let (commands, command_rx) = mpsc::unbounded_channel();
+        let (shutdown, shutdown_rx) = mpsc::unbounded_channel();
         let (tx, events) = std::sync::mpsc::channel();
         let sink = Sink {
             tx,
@@ -138,18 +169,41 @@ impl Backend {
         let client = Arc::new(Client::new());
         let http = client.http().clone();
         let resolver = Arc::new(Resolver::new(paths.runtime.clone()));
-        runtime.spawn(Worker::new(client, resolver, paths, sink).run(command_rx));
+        let worker = Worker::new(client, resolver.clone(), paths, sink);
+        runtime.spawn(worker.run(command_rx, shutdown_rx));
         Ok(Self {
             commands,
             events,
             http,
             runtime: runtime.handle().clone(),
+            resolver,
+            shutdown,
             _runtime: runtime,
         })
     }
 
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    /// Whether a song's stream is resolved, so a click on it starts at once.
+    pub fn prepared(&self, video_id: &str) -> bool {
+        self.resolver.cached(video_id).is_some()
+    }
+
+    /// Saves the session and stops playback. Runs when the backend is
+    /// dropped; call it first if the process ends any other way.
+    pub fn shutdown(&self) {
+        let (done, wait) = std::sync::mpsc::channel();
+        if self.shutdown.send(done).is_ok() {
+            let _ = wait.recv_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -160,11 +214,14 @@ enum Internal {
         generation: u64,
         stream: anyhow::Result<Stream>,
     },
+    /// The next song resolved, with its player response when it was fetched.
     NextReady {
         generation: u64,
-        pos: usize,
+        /// Its queue entry.
+        id: u64,
         video_id: String,
         stream: Stream,
+        player: Option<sound::PlayerInfo>,
     },
     Watch {
         generation: u64,
@@ -192,16 +249,31 @@ enum Internal {
     Online {
         generation: u64,
     },
+    /// A song's player response (loudness, play tracking).
+    Player {
+        video_id: String,
+        info: sound::PlayerInfo,
+    },
+    /// The sleep timer's clock, for the timer `stamp`.
+    SleepTick {
+        stamp: u64,
+    },
+    /// Equalizer edits stopped (no newer one than `stamp`).
+    EqualizerSettled {
+        stamp: u64,
+    },
 }
 
 /// The track queued in mpv behind the current one.
 #[derive(Clone)]
 struct Appended {
-    /// Its play-order position.
-    pos: usize,
+    /// Its queue entry.
+    id: u64,
     itag: u32,
     /// mpv's playlist entry id.
     entry: i64,
+    /// The loudness gain it was queued with.
+    gain: Option<f64>,
 }
 
 struct Worker {
@@ -217,10 +289,8 @@ struct Worker {
     last_connect: Option<Instant>,
     last_death: Option<Instant>,
 
-    queue: Vec<Track>,
-    /// Play order: indices into `queue`.
-    order: Vec<usize>,
-    /// Position in `order` of the current track.
+    queue: queue::Queue,
+    /// Position in the play order of the current track.
     pos: Option<usize>,
     appended: Option<Appended>,
     /// mpv's playlist entry id of the current track.
@@ -242,12 +312,33 @@ struct Worker {
     /// mpv's `pause` and `idle-active`: playing means neither.
     paused: bool,
     idle: bool,
+    /// Where the current song starts when it next loads: a restored
+    /// session's position, or a seek made before Play.
+    resume_at: Option<f64>,
+    /// The current song's resolve and the next song's prefetch, stopped
+    /// when they no longer apply.
+    resolving: Option<tokio::task::AbortHandle>,
+    prefetching: Option<tokio::task::AbortHandle>,
+    /// When the current song was asked for, to log how long it took to start.
+    asked: Instant,
+    /// Loudness and play tracking from player responses, by video id.
+    players: HashMap<String, sound::PlayerInfo>,
+    /// The `af` value mpv has.
+    af: String,
+    /// Bumped by every equalizer change.
+    eq_stamp: u64,
+    /// Bumped by every sleep timer change; its clock stops on a stale one.
+    sleep_stamp: Arc<AtomicU64>,
+    /// The sleep timer's fade: the share of the volume playing (1 = none).
+    fade: f64,
+    last_save: Instant,
 }
 
 impl Worker {
     fn new(client: Arc<Client>, resolver: Arc<Resolver>, paths: Paths, sink: Sink) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let (mpv_tx, mpv_rx) = mpsc::unbounded_channel();
+        let settings = crate::settings::Settings::load(&paths);
         Self {
             client,
             resolver,
@@ -260,8 +351,7 @@ impl Worker {
             mpv: None,
             last_connect: None,
             last_death: None,
-            queue: Vec::new(),
-            order: Vec::new(),
+            queue: queue::Queue::default(),
             pos: None,
             appended: None,
             current_entry: None,
@@ -275,17 +365,34 @@ impl Worker {
             state: Playback {
                 volume: 100.0,
                 autoplay: true,
+                normalize: settings.normalizes(),
+                equalizer: settings.equalizer,
                 ..Playback::default()
             },
             last_emit: Instant::now(),
             paused: false,
             idle: true,
+            resume_at: None,
+            resolving: None,
+            prefetching: None,
+            asked: Instant::now(),
+            players: HashMap::new(),
+            af: String::new(),
+            eq_stamp: 0,
+            sleep_stamp: Arc::default(),
+            fade: 1.0,
+            last_save: Instant::now(),
         }
     }
 
-    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
+    async fn run(
+        mut self,
+        mut commands: mpsc::UnboundedReceiver<Command>,
+        mut shutdown: mpsc::UnboundedReceiver<std::sync::mpsc::Sender<()>>,
+    ) {
         let mut internal = self.internal_rx.take().expect("internal receiver");
         let mut mpv_events = self.mpv_rx.take().expect("mpv receiver");
+        self.restore_session();
         self.connect();
         loop {
             tokio::select! {
@@ -295,6 +402,11 @@ impl Worker {
                 },
                 Some(message) = internal.recv() => self.internal(message).await,
                 Some(event) = mpv_events.recv() => self.mpv_event(event).await,
+                Some(done) = shutdown.recv() => {
+                    self.save_session(true);
+                    let _ = done.send(());
+                    break;
+                }
             }
         }
     }
@@ -415,8 +527,10 @@ impl Worker {
                 } else if let (Some(mpv), false) = (&self.mpv, self.idle) {
                     let _ = mpv.set("pause", json!(self.state.playing)).await;
                 } else if let Some(pos) = self.pos {
-                    // Nothing loaded (the queue ended, or mpv restarted): play again.
-                    self.start(pos).await;
+                    // Nothing loaded (a restored session, the queue ended, or
+                    // mpv restarted): play, from where a restored song was.
+                    let at = self.resume_at.take();
+                    self.start_at(pos, at).await;
                 }
             }
             Command::Next => self.next(false).await,
@@ -431,20 +545,26 @@ impl Worker {
             Command::Volume(volume) => {
                 self.state.volume = volume.clamp(0.0, 100.0);
                 if let Some(mpv) = &self.mpv {
-                    let _ = mpv.set("volume", json!(self.state.volume)).await;
+                    let _ = mpv
+                        .set("volume", json!(self.state.volume * self.fade))
+                        .await;
                 }
                 self.emit(true);
+                self.save_session(false);
             }
             Command::ToggleShuffle => {
                 self.state.shuffle = !self.state.shuffle;
-                if let Some(pos) = self.pos {
-                    let current = self.order[pos];
-                    self.build_order(current);
-                    self.drop_appended().await;
-                    self.send_queue();
-                    self.prefetch();
-                }
-                self.emit(true);
+                let shuffle = self.state.shuffle;
+                self.edit_queue(|queue, pos, _| {
+                    if let Some(pos) = pos {
+                        if shuffle {
+                            queue.shuffle(pos);
+                        } else {
+                            queue.unshuffle(pos);
+                        }
+                    }
+                })
+                .await;
             }
             Command::CycleRepeat => {
                 self.state.repeat = match self.state.repeat {
@@ -452,27 +572,18 @@ impl Worker {
                     Repeat::All => Repeat::One,
                     Repeat::One => Repeat::Off,
                 };
-                if let Some(mpv) = &self.mpv {
-                    let _ = mpv
-                        .set(
-                            "loop-file",
-                            json!(if self.state.repeat == Repeat::One {
-                                "inf"
-                            } else {
-                                "no"
-                            }),
-                        )
-                        .await;
-                }
+                self.apply_loop().await;
                 self.emit(true);
+                self.save_session(true);
             }
             Command::Autoplay(on) => {
                 self.state.autoplay = on;
                 self.emit(true);
+                self.save_session(true);
                 self.maybe_extend();
             }
             Command::JumpTo(pos) => {
-                if pos < self.order.len() {
+                if pos < self.queue.len() {
                     self.start(pos).await;
                 }
             }
@@ -480,6 +591,7 @@ impl Worker {
             Command::UseProfile(profile) => {
                 let settings = crate::settings::Settings {
                     browser_profile: Some(profile),
+                    ..crate::settings::Settings::load(&self.paths)
                 };
                 if let Err(error) = settings.save(&self.paths) {
                     self.sink.send(Event::Error(format!(
@@ -488,10 +600,39 @@ impl Worker {
                 }
                 self.connect();
             }
-            Command::Prepare(video_id) => {
-                let resolver = self.resolver.clone();
-                tokio::spawn(async move { resolver.prepare(&video_id).await });
+            Command::Prepare(video_id) => self.resolver.prepare(&video_id),
+            Command::PrepareMany(video_ids) => self.resolver.prepare_many(video_ids),
+            Command::PlayNext(tracks) => self.add(tracks, true).await,
+            Command::AddToQueue(tracks) => self.add(tracks, false).await,
+            Command::RemoveFromQueue(at) => {
+                if self.pos != Some(at) {
+                    self.edit_queue(|queue, _, _| {
+                        queue.remove(at);
+                    })
+                    .await;
+                }
             }
+            Command::MoveInQueue { from, to } => {
+                self.edit_queue(|queue, pos, shuffled| queue.move_entry(from, to, pos, shuffled))
+                    .await;
+            }
+            Command::ClearUpcoming => {
+                if self.pos.is_some() {
+                    // Pages of the list and radio still on their way don't refill it.
+                    self.epoch += 1;
+                    self.extending = false;
+                    self.advance_pending = false;
+                    self.edit_queue(|queue, pos, _| {
+                        if let Some(pos) = pos {
+                            queue.clear_after(pos);
+                        }
+                    })
+                    .await;
+                }
+            }
+            Command::SleepTimer(choice) => self.set_sleep(choice).await,
+            Command::Equalizer(equalizer) => self.set_equalizer(equalizer).await,
+            Command::Normalize(on) => self.set_normalize(on).await,
         }
     }
 

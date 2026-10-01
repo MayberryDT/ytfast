@@ -6,6 +6,7 @@ pub mod backend;
 pub mod covers;
 #[cfg(feature = "e2e")]
 pub mod e2e;
+pub mod equalizer;
 pub mod icons;
 pub mod innertube;
 pub mod model;

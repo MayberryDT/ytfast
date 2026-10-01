@@ -10,6 +10,12 @@ pub struct Settings {
     /// unset means the most recently used signed-in profile.
     #[serde(default)]
     pub browser_profile: Option<String>,
+    /// Even out loudness between songs from YouTube's loudness data; unset
+    /// means on. See [`Settings::normalizes`].
+    #[serde(default)]
+    pub normalize: Option<bool>,
+    #[serde(default)]
+    pub equalizer: crate::equalizer::Equalizer,
 }
 
 impl Settings {
@@ -19,6 +25,10 @@ impl Settings {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
+    }
+
+    pub fn normalizes(&self) -> bool {
+        self.normalize.unwrap_or(true)
     }
 
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {

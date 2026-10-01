@@ -3,11 +3,13 @@
 //! Views read [`App`] and push [`Action`]s.
 
 mod chrome;
+mod equalizer;
 mod now_playing;
 mod pages;
 mod player;
 mod settings;
 mod shelves;
+mod sleep;
 mod widgets;
 
 use crate::app::{Action, App};
@@ -65,6 +67,9 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         }
         errors(app, ui, &p, actions);
     });
+    if app.equalizer_open {
+        equalizer::equalizer(app, ui.ctx(), &p, actions);
+    }
 }
 
 fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
