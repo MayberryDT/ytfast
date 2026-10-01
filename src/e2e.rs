@@ -2312,6 +2312,23 @@ fn note_item(key: &str, item: &crate::model::Item) {
     probe(key, json!({"id": item_id(item), "title": item.title}));
 }
 
+/// The rows made cold for the cold click: (video id, title), in page order.
+fn cold_rows() -> Vec<(String, String)> {
+    probed("engine:cold")
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some((
+                        r["id"].as_str()?.to_owned(),
+                        r["title"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Audio is coming out: mpv is past the start of the song.
 fn audible(app: &App) -> bool {
     app.playback.playing && !app.playback.loading && app.playback.position > 0.05
@@ -2575,20 +2592,25 @@ fn engine() -> Vec<Step> {
             )
         }),
         Step::Screenshot("e01-playlist"),
-        // A cold click on a song nothing prepared, past the first rows.
-        run("pick an unprepared song", |a| {
-            if let Some(item) = page_items(a)
+        // A cold click on a song nothing prepared. Streams saved by earlier
+        // runs stay valid for hours and may cover every row on screen, so
+        // the rows past the first four (the ones the page prepares) are made
+        // cold first, and the first of them on screen is clicked.
+        run("make the rows past the first four cold", |a| {
+            let candidates: Vec<Value> = page_items(a)
                 .into_iter()
                 .skip(4)
-                .find(|i| !a.backend.prepared(&item_id(i)))
-            {
-                note_item("engine:cold", item);
-            }
+                .filter(|i| a.backend.make_cold(&item_id(i)))
+                .map(|i| json!({"id": item_id(i), "title": i.title}))
+                .collect();
+            probe("engine:cold", json!(candidates));
         }),
         mark_time("cold"),
-        click_with("the unprepared song", |_| noted("engine:cold", "title")),
+        click_first_visible("an unprepared song on screen", |_| {
+            cold_rows().into_iter().map(|(_, title)| title).collect()
+        }),
         wait("the unprepared song plays", 90.0, |a| {
-            audible(a) && current_id(a) == json!(noted("engine:cold", "id"))
+            audible(a) && cold_rows().iter().any(|(id, _)| current_id(a) == json!(id))
         }),
         measure("cold_click_unprepared_ms", ms_since("cold")),
         measure("unprepared_song", playing_track),

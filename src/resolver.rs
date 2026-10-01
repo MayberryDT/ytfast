@@ -250,6 +250,24 @@ impl Resolver {
         self.save();
     }
 
+    /// E2E: forgets `video_id`'s stream; true if nothing is resolving it or
+    /// waiting to, so a click on it is a cold one.
+    #[cfg(feature = "e2e")]
+    pub fn make_cold(&self, video_id: &str) -> bool {
+        self.forget(video_id);
+        !self
+            .flights
+            .lock()
+            .expect("flights lock")
+            .contains_key(video_id)
+            && !self
+                .backlog
+                .lock()
+                .expect("backlog lock")
+                .iter()
+                .any(|id| id == video_id)
+    }
+
     /// The best stream the account can get, for playback.
     pub async fn resolve(self: &Arc<Self>, video_id: &str) -> Result<Stream> {
         self.request(video_id).wait().await

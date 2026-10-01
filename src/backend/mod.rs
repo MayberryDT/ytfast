@@ -276,6 +276,12 @@ impl Backend {
         self.resolver.cached(video_id).is_some()
     }
 
+    /// E2E: drops a song's resolved stream; true if a click on it is now cold.
+    #[cfg(feature = "e2e")]
+    pub fn make_cold(&self, video_id: &str) -> bool {
+        self.resolver.make_cold(video_id)
+    }
+
     /// Saves the session and stops playback. Runs when the backend is
     /// dropped; call it first if the process ends any other way.
     pub fn shutdown(&self) {
