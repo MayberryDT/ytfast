@@ -18,7 +18,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 | Media | Audio only. No music videos, ever. Highest available quality (with Premium, Opus at ~256 kbps, itag 774). |
 | Look | Similar to YouTube Music in places and labels; ytfast's own motion and presentation. Colours follow the active Omarchy theme and are never hard-coded; Now Playing and Stage also take colour from the current cover. |
 | Write-back | ytfast acts on the account like YouTube Music does: plays reported to history, likes and dislikes, saving albums and playlists to the library, subscribing to artists, and creating, editing and deleting playlists. |
-| Desktop integration | A full Omarchy citizen: MPRIS (media keys, `playerctl`, the shell's media widget), playing on after the window closes, a command line that drives the running app, optional song-change notifications, and a compact mini player. |
+| Desktop integration | A full Omarchy citizen: MPRIS (media keys, `playerctl`, the shell's media widget), playing on after the window closes with an icon in the tray, a command line that drives the running app, optional song-change notifications, and a compact mini player. |
 | Other services | Only LRCLIB, which supplies timed lyrics when YouTube Music has none. No scrobbling or presence services (Last.fm, ListenBrainz, Discord). |
 
 ## Journeys
@@ -67,7 +67,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 ### Desktop
 
 - ytfast is an MPRIS player: media keys, `playerctl` and the Omarchy bar's media widget see the song, cover, position and controls, and can play, pause, skip, seek and raise the window.
-- Closing the window keeps the music playing; launching again or MPRIS Raise brings the window back where it was. Quit (`Ctrl+Q`) ends playback.
+- Closing the window keeps the music playing, with an icon in the bar's tray while the window is closed: a click brings the window back where it was, a middle-click plays or pauses, the wheel sets the volume, and its menu has Play/Pause, Next, Previous, Show Music and Quit. Launching again or MPRIS Raise also brings the window back. Quit (`Ctrl+Q`, the tray menu, `ytfast quit`) ends playback, even while the window sits on a workspace that isn't shown.
 - `ytfast toggle|next|previous|like|…` drives the running app, for Hyprland bindings and scripts.
 - Song-change notifications are available and off by default.
 - A mini player shows cover, title, artist, progress and controls in a small window suited to floating in Hyprland.

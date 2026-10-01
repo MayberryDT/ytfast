@@ -56,7 +56,7 @@ Right-click a song, album, playlist or artist (or use its **⋮**) for Play next
 **Save** in Up next makes the queue a playlist.
 ## On the desktop
 
-Closing the window keeps the music playing. Launch Music again (or run `ytfast show`, or raise it from the media widget) and it comes back where you left it. **Ctrl+Q** quits and stops the music; closing the window with nothing queued quits too.
+Closing the window keeps the music playing, with a Music icon in the bar's tray: click it to bring the window back where you left it, middle-click to play or pause, scroll to change the volume, or right-click for Next, Previous and Quit. Launching Music again, `ytfast show` or the media widget also bring it back. **Ctrl+Q** quits and stops the music; closing the window with nothing queued quits too.
 
 The running app takes commands, for Hyprland bindings and scripts:
 
