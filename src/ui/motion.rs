@@ -231,7 +231,14 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
         }
     };
     let t = (now - claimed_at) as f32;
-    if f64::from(t) >= FLIGHT {
+    // The place's own image may still be on its way: hold the cover there
+    // until it is, rather than leave an empty frame.
+    let dest_ready = same_cover(&flight.url, url)
+        || matches!(
+            egui::Image::new(url.to_owned()).load_for_size(ctx, dest.size()),
+            Ok(egui::load::TexturePoll::Ready { .. })
+        );
+    if f64::from(t) >= FLIGHT && (dest_ready || f64::from(t) >= FLIGHT + 2.0) {
         ctx.data_mut(|d| d.remove::<Flight>(flight_id()));
         return false;
     }
@@ -266,7 +273,7 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
         .corner_radius(corner)
         .show_loading_spinner(false)
         .paint_at(&over, rect);
-    if !same_cover(&flight.url, url) {
+    if dest_ready && !same_cover(&flight.url, url) {
         let fade = ((t / FLIGHT as f32 - 0.5) / 0.45).clamp(0.0, 1.0);
         if fade > 0.0 {
             egui::Image::new(url.to_owned())

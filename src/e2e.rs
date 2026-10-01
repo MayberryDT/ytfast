@@ -126,8 +126,16 @@ fn motion() -> Vec<Step> {
     let home3 = View::Home.target();
     steps.extend([
         Step::Sleep(1.5),
-        click_with("a song on Home", move |a| {
-            first_item_title(a, &home3, |i| i.track.is_some() && i.thumbnail.is_some())
+        click_with("a song on Home from a shelf of songs", move |a| {
+            // A shelf with several songs, so Next has a song ready to hand off to.
+            let page = a.page_state(&home3)?.page.as_ref()?;
+            page.shelves
+                .iter()
+                .find(|s| s.items.iter().filter(|i| i.track.is_some()).count() >= 4)?
+                .items
+                .iter()
+                .find(|i| i.track.is_some() && i.thumbnail.is_some())
+                .map(|i| i.title.clone())
         }),
     ]);
     steps.extend(burst(&[
