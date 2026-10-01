@@ -3687,6 +3687,48 @@ fn queue_playlist() -> Option<Target> {
     fact("control_playlist").map(|id| Target::browse(format!("VL{id}")))
 }
 
+fn first_artist(track: &crate::model::Track) -> String {
+    track
+        .artists
+        .first()
+        .map(|r| r.text.trim().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// The saved playlist's rows (as YouTube Music lists them after the mark)
+/// against the queue noted before Create, position by position: (queued
+/// id, saved id, same song). A queued music video is saved as its audio
+/// version, a different video id by the same artist (probed 2026-10-01:
+/// Pomplamoose's OMV `xy98W3a26gs` is listed as `7O2_XdRJzOU`), so a row is
+/// the same song when the id or the first artist matches. `None` until the
+/// playlist lists every queued song (or its first 100).
+fn saved_as_queued(app: &App) -> Option<Vec<(String, String, bool)>> {
+    let queued: Vec<(String, String)> =
+        serde_json::from_value(probed("control:queue")).unwrap_or_default();
+    let page = refetched(app, &queue_playlist()?)?;
+    let saved: Vec<(String, String)> = crate::account::entries(page)?
+        .items
+        .iter()
+        .filter_map(|i| i.track.as_ref())
+        .map(|t| (t.video_id.clone(), first_artist(t)))
+        .collect();
+    let n = saved.len().min(queued.len());
+    if queued.is_empty() || (saved.len() < queued.len() && n < 100) {
+        return None;
+    }
+    Some(
+        queued
+            .iter()
+            .zip(&saved)
+            .take(n)
+            .map(|((qid, qartist), (sid, sartist))| {
+                let same = qid == sid || (!qartist.is_empty() && qartist == sartist);
+                (qid.clone(), sid.clone(), same)
+            })
+            .collect(),
+    )
+}
+
 /// Control (docs/SPEC.md § Control) and Play anything (signature moments)
 /// through the keyboard and the menus: Ctrl+K, typing a song and Enter
 /// (timed to audible), the `?` overlay, Space, →, Shift+→, - and +, M, S,
@@ -4008,11 +4050,13 @@ fn control() -> Vec<Step> {
         }),
         run("note the queue", |a| {
             let mut seen = std::collections::HashSet::new();
-            let ids: Vec<String> = queue_ids(a)
-                .into_iter()
-                .filter(|id| seen.insert(id.clone()))
+            let songs: Vec<(String, String)> = a
+                .queue
+                .iter()
+                .filter(|t| seen.insert(t.video_id.clone()))
+                .map(|t| (t.video_id.clone(), first_artist(t)))
                 .collect();
-            probe("control:queue", json!(ids));
+            probe("control:queue", json!(songs));
         }),
         Step::Sleep(0.5),
         Step::Screenshot("control-09-save-queue"),
@@ -4038,23 +4082,15 @@ fn control() -> Vec<Step> {
                     a.ensure_page(target, true);
                 }
             },
-            |a| {
-                let expected: Vec<String> =
-                    serde_json::from_value(probed("control:queue")).unwrap_or_default();
-                let Some(listed) = queue_playlist().and_then(|t| refetched(a, &t).map(song_ids))
-                else {
-                    return false;
-                };
-                let n = listed.len().min(expected.len());
-                n > 0 && listed[..n] == expected[..n] && (n == expected.len() || n >= 100)
-            },
+            |a| saved_as_queued(a).is_some_and(|pairs| pairs.iter().all(|p| p.2)),
         ),
-        measure("saved_queue_songs", |a| {
-            json!(
-                queue_playlist()
-                    .and_then(|t| refetched(a, &t).map(song_ids))
-                    .map(|ids| ids.len())
-            )
+        measure("saved_queue", |a| {
+            json!(saved_as_queued(a).map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(queued, saved, same)| json!({"queued": queued, "saved": saved, "same": same}))
+                    .collect::<Vec<_>>()
+            }))
         }),
         run("open it", |a| {
             if let Some(target) = queue_playlist() {
