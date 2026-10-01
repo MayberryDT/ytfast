@@ -2,14 +2,16 @@
 //! playlists to the library, subscriptions, and the account's own playlists
 //! (docs/SPEC.md § Journeys → Account; § Decisions → Write-back).
 //!
-//! Every change shows in the frame of the input: the app marks the new state
-//! (or edits the cached page), then the backend asks YouTube Music. If YouTube
-//! Music refuses, the change is rolled back and a plain message says so. A
-//! few seconds after a change succeeds, the pages it affects are fetched
-//! again; YouTube Music takes up to ~3 s to show some changes, so for a while
-//! the app's own marks win over what a fetched page says.
+//! Every change shows in the frame of the input: the app shows the new state
+//! (or edits the cached pages), then the backend asks YouTube Music, one
+//! write at a time in the order asked. If YouTube Music refuses, the app
+//! goes back to the newest change still on its way, or to what YouTube Music
+//! last said, and a plain message says so. A few seconds after a change
+//! succeeds, the pages it affects are fetched again; YouTube Music takes up
+//! to ~3 s to show some changes, so for a while the app's own state wins
+//! over what a fetched page says.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -163,7 +165,8 @@ pub enum Dialog {
     },
 }
 
-/// The account's state as the app knows it, over what pages say.
+/// The account's state as the app shows it: what YouTube Music last said,
+/// or the newest change still on its way there.
 #[derive(Clone, Debug, Default)]
 pub struct Marks {
     pub likes: HashMap<String, LikeStatus>,
@@ -195,24 +198,70 @@ impl Marks {
             .copied()
             .unwrap_or(subscription.subscribed)
     }
+
+    /// What is known about `id` for the kind of `mark`.
+    fn get(&self, id: &str, mark: Mark) -> Option<Mark> {
+        match mark {
+            Mark::Like(_) => self.likes.get(id).copied().map(Mark::Like),
+            Mark::Saved(_) => self.saved.get(id).copied().map(Mark::Saved),
+            Mark::Subscribed(_) => self.subscribed.get(id).copied().map(Mark::Subscribed),
+        }
+    }
+
+    fn set(&mut self, id: &str, mark: Mark) {
+        match mark {
+            Mark::Like(v) => self.likes.insert(id.to_owned(), v).map(drop),
+            Mark::Saved(v) => self.saved.insert(id.to_owned(), v).map(drop),
+            Mark::Subscribed(v) => self.subscribed.insert(id.to_owned(), v).map(drop),
+        };
+    }
+
+    /// Forgets `id` for the kind of `mark`: pages speak for it again.
+    fn clear(&mut self, id: &str, mark: Mark) {
+        match mark {
+            Mark::Like(_) => self.likes.remove(id).map(drop),
+            Mark::Saved(_) => self.saved.remove(id).map(drop),
+            Mark::Subscribed(_) => self.subscribed.remove(id).map(drop),
+        };
+    }
+}
+
+/// A rating, library state or subscription of one id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    Like(LikeStatus),
+    Saved(bool),
+    Subscribed(bool),
+}
+
+fn same_kind(a: Mark, b: Mark) -> bool {
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
 }
 
 #[derive(Default)]
 pub struct AccountState {
-    /// Shared with the views each frame (cheap to hand out).
+    /// What the views show; shared with them each frame (cheap to hand out).
     pub marks: Arc<Marks>,
+    /// What YouTube Music last said (fresh pages, watch-next, accepted changes).
+    confirmed: Marks,
     pub dialog: Option<Dialog>,
     /// The newest ratings YouTube Music returned (watch-next), as fetched.
     pub fetched_likes: HashMap<String, LikeStatus>,
     /// The last playlist created here: (title, id).
     pub created: Option<(String, String)>,
-    /// When each id was last changed here.
-    changed: HashMap<String, Instant>,
+    /// When a change to each id was last accepted.
+    accepted: HashMap<String, Instant>,
     pending: HashMap<u64, Pending>,
     /// Changes to cached pages, applied again to every copy of an affected
     /// page that arrives while they are in flight or recent.
     overlays: Vec<Overlay>,
+    /// The affected pages as YouTube Music last sent them, before the
+    /// overlays: a refused change is taken back by applying the others to
+    /// these again.
+    bases: HashMap<String, Page>,
     next_op: u64,
+    /// A move waiting for the next part of its playlist to load.
+    deferred_move: Option<DeferredMove>,
 }
 
 impl AccountState {
@@ -221,15 +270,12 @@ impl AccountState {
         !self.pending.is_empty()
     }
 
-    fn subjects_in_flight(&self) -> HashSet<&str> {
-        self.pending.values().map(|p| p.subject.as_str()).collect()
-    }
-
-    /// Whether a fetched page may replace the app's mark for `id`.
-    fn page_wins(&self, id: &str, busy: &HashSet<&str>) -> bool {
-        !busy.contains(id)
+    /// Whether a fetched page speaks for `id`: no change to it is on its
+    /// way, and YouTube Music has had time to list the last one.
+    fn page_wins(&self, id: &str) -> bool {
+        !self.pending.values().any(|p| p.subject == id)
             && self
-                .changed
+                .accepted
                 .get(id)
                 .is_none_or(|t| t.elapsed() > TRUST_LOCAL)
     }
@@ -239,6 +285,35 @@ impl AccountState {
         let pending = &self.pending;
         self.overlays
             .retain(|o| pending.contains_key(&o.op) || o.made.elapsed() <= TRUST_LOCAL);
+        if self.overlays.is_empty() {
+            self.bases.clear();
+        }
+    }
+
+    /// Shows for `id` the newest change on its way, else what YouTube
+    /// Music last said, else whatever the page says.
+    fn settle(&mut self, id: &str, kind: Mark) {
+        let newest = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.subject == id)
+            .filter_map(|(op, p)| Some((*op, p.mark.filter(|m| same_kind(*m, kind))?)))
+            .max_by_key(|(op, _)| *op)
+            .map(|(_, m)| m)
+            .or_else(|| self.confirmed.get(id, kind));
+        let marks = Arc::make_mut(&mut self.marks);
+        match newest {
+            Some(mark) => marks.set(id, mark),
+            None => marks.clear(id, kind),
+        }
+    }
+
+    /// YouTube Music says `id` is `mark` (a fresh page or watch-next).
+    fn heard(&mut self, id: &str, mark: Mark) {
+        if self.page_wins(id) {
+            self.confirmed.set(id, mark);
+            Arc::make_mut(&mut self.marks).set(id, mark);
+        }
     }
 }
 
@@ -250,27 +325,8 @@ struct Pending {
     /// What to say when YouTube Music answers that the song is already in
     /// the playlist.
     duplicate: Option<String>,
-    undo: Undo,
-}
-
-enum Undo {
-    Like {
-        video_id: String,
-        set: LikeStatus,
-        before: Option<LikeStatus>,
-    },
-    Saved {
-        id: String,
-        set: bool,
-        before: Option<bool>,
-    },
-    Subscribed {
-        id: String,
-        set: bool,
-        before: Option<bool>,
-    },
-    /// The affected cached pages as they were before the change, by key.
-    Pages(Vec<(String, Page)>),
+    /// The rating, library state or subscription the change sets.
+    mark: Option<Mark>,
 }
 
 /// A change to cached pages that YouTube Music may not list yet. It is
@@ -421,6 +477,14 @@ impl PageEdit {
             | PageEdit::Details { playlist_id, .. }
             | PageEdit::Delete { playlist_id } => Some(playlist_id),
         }
+    }
+
+    /// Whether the page cached under `key` is one the change affects.
+    fn affects(&self, key: &str, page: &Page) -> bool {
+        key == library_target().key()
+            || self
+                .playlist()
+                .is_some_and(|id| is_playlist_page(key, page, id))
     }
 
     /// Applies the change to the page cached under `key`, if it is one the
@@ -588,10 +652,6 @@ impl App {
         matches!(self.account, Account::SignedIn { .. })
     }
 
-    fn marks_mut(&mut self) -> &mut Marks {
-        Arc::make_mut(&mut self.account_state.marks)
-    }
-
     /// The cached pages of a playlist (it may be open under more than one key).
     fn playlist_keys(&self, playlist_id: &str) -> Vec<String> {
         self.pages
@@ -648,17 +708,46 @@ impl App {
     fn send_edit(&mut self, edit: Edit, refresh: Vec<Target>, pending: Pending) -> u64 {
         self.account_state.next_op += 1;
         let op = self.account_state.next_op;
-        self.account_state
-            .changed
-            .insert(pending.subject.clone(), Instant::now());
         self.account_state.pending.insert(op, pending);
         self.backend
             .send(Command::AccountEdit { op, edit, refresh });
         op
     }
 
+    /// Shows a rating, library state or subscription at once and asks
+    /// YouTube Music to make it so. `was` is what was shown: with no change
+    /// to `id` on its way, that is what YouTube Music last said, and what a
+    /// refusal goes back to.
+    fn send_mark(
+        &mut self,
+        id: String,
+        was: Mark,
+        mark: Mark,
+        edit: Edit,
+        refresh: Vec<Target>,
+        failed: String,
+    ) {
+        let state = &mut self.account_state;
+        let in_flight = state.pending.values().any(|p| p.subject == id);
+        if !in_flight && state.confirmed.get(&id, was).is_none() {
+            state.confirmed.set(&id, was);
+        }
+        Arc::make_mut(&mut state.marks).set(&id, mark);
+        self.send_edit(
+            edit,
+            refresh,
+            Pending {
+                subject: id,
+                failed,
+                duplicate: None,
+                mark: Some(mark),
+            },
+        );
+    }
+
     /// Changes the cached pages at once and asks YouTube Music to make the
-    /// change; the pages as they were are kept for a rollback.
+    /// change. The affected pages as YouTube Music sent them are kept, so a
+    /// refusal can be taken back.
     fn send_page_edit(
         &mut self,
         edit: Edit,
@@ -667,20 +756,18 @@ impl App {
         failed: String,
         duplicate: Option<String>,
     ) {
-        let mut keys = change
-            .playlist()
-            .map(|id| self.playlist_keys(id))
-            .unwrap_or_default();
-        keys.push(library_target().key());
-        let before = keys
-            .into_iter()
-            .filter_map(|k| {
-                let page = self.pages.get(&k)?.page.clone()?;
-                Some((k, page))
-            })
-            .collect();
-        for (key, state) in &mut self.pages {
-            if let Some(page) = state.page.as_mut() {
+        let state = &mut self.account_state;
+        state.expire_overlays();
+        for (key, page_state) in &mut self.pages {
+            let Some(page) = page_state.page.as_mut() else {
+                continue;
+            };
+            if change.affects(key, page) {
+                // No change in force touches this page yet: it is as sent.
+                state
+                    .bases
+                    .entry(key.clone())
+                    .or_insert_with(|| page.clone());
                 change.apply(key, page);
             }
         }
@@ -698,7 +785,7 @@ impl App {
                 subject,
                 failed,
                 duplicate,
-                undo: Undo::Pages(before),
+                mark: None,
             },
         );
         self.account_state.overlays.push(Overlay {
@@ -708,14 +795,35 @@ impl App {
         });
     }
 
-    /// Applies the page changes still in force to the page cached under `key`.
+    /// A copy of the page cached under `key` arrived: it becomes the base
+    /// of the changes in force, which are applied to it.
     fn apply_overlays(&mut self, key: &str) {
-        self.account_state.expire_overlays();
+        let state = &mut self.account_state;
+        state.expire_overlays();
         let Some(page) = self.pages.get_mut(key).and_then(|s| s.page.as_mut()) else {
             return;
         };
-        for overlay in &self.account_state.overlays {
+        if !state.overlays.iter().any(|o| o.edit.affects(key, page)) {
+            return;
+        }
+        state.bases.insert(key.to_owned(), page.clone());
+        for overlay in &state.overlays {
             overlay.edit.apply(key, page);
+        }
+    }
+
+    /// Redraws the affected pages from their bases with the changes in force.
+    fn rebuild_pages(&mut self) {
+        let state = &mut self.account_state;
+        state.expire_overlays();
+        for (key, base) in &state.bases {
+            let Some(page) = self.pages.get_mut(key).and_then(|s| s.page.as_mut()) else {
+                continue;
+            };
+            *page = base.clone();
+            for overlay in &state.overlays {
+                overlay.edit.apply(key, page);
+            }
         }
     }
 
@@ -746,34 +854,23 @@ impl App {
         match action {
             AccountAction::Dialog(_) => {}
             AccountAction::Rate { track, status } => {
-                let id = track.video_id.clone();
-                let before = self.account_state.marks.likes.get(&id).copied();
                 let was = self.account_state.marks.like(&track);
-                self.marks_mut().likes.insert(id.clone(), status);
                 let verb = match (status, was) {
-                    (LikeStatus::Like, _) => "like".to_owned(),
-                    (LikeStatus::Dislike, _) => "dislike".to_owned(),
-                    (LikeStatus::Indifferent, LikeStatus::Dislike) => {
-                        "remove the dislike from".to_owned()
-                    }
-                    (LikeStatus::Indifferent, _) => "unlike".to_owned(),
+                    (LikeStatus::Like, _) => "like",
+                    (LikeStatus::Dislike, _) => "dislike",
+                    (LikeStatus::Indifferent, LikeStatus::Dislike) => "remove the dislike from",
+                    (LikeStatus::Indifferent, _) => "unlike",
                 };
-                self.send_edit(
+                self.send_mark(
+                    track.video_id.clone(),
+                    Mark::Like(was),
+                    Mark::Like(status),
                     Edit::Rate {
-                        video_id: id.clone(),
+                        video_id: track.video_id.clone(),
                         status,
                     },
                     vec![Target::browse("VLLM"), LibraryTab::Songs.target()],
-                    Pending {
-                        subject: id.clone(),
-                        failed: format!("Couldn't {verb} {}.", quoted(&track.title)),
-                        duplicate: None,
-                        undo: Undo::Like {
-                            video_id: id,
-                            set: status,
-                            before,
-                        },
-                    },
+                    format!("Couldn't {verb} {}.", quoted(&track.title)),
                 );
             }
             AccountAction::Save {
@@ -781,29 +878,18 @@ impl App {
                 title,
                 save,
             } => {
-                let before = self.account_state.marks.saved.get(&playlist_id).copied();
-                self.marks_mut().saved.insert(playlist_id.clone(), save);
                 let failed = if save {
                     format!("Couldn't save {} to your library.", quoted(&title))
                 } else {
                     format!("Couldn't remove {} from your library.", quoted(&title))
                 };
-                self.send_edit(
-                    Edit::Save {
-                        playlist_id: playlist_id.clone(),
-                        save,
-                    },
+                self.send_mark(
+                    playlist_id.clone(),
+                    Mark::Saved(!save),
+                    Mark::Saved(save),
+                    Edit::Save { playlist_id, save },
                     vec![LibraryTab::Albums.target(), LibraryTab::Playlists.target()],
-                    Pending {
-                        subject: playlist_id.clone(),
-                        failed,
-                        duplicate: None,
-                        undo: Undo::Saved {
-                            id: playlist_id,
-                            set: save,
-                            before,
-                        },
-                    },
+                    failed,
                 );
             }
             AccountAction::Subscribe {
@@ -811,39 +897,24 @@ impl App {
                 name,
                 subscribe,
             } => {
-                let before = self
-                    .account_state
-                    .marks
-                    .subscribed
-                    .get(&channel_id)
-                    .copied();
-                self.marks_mut()
-                    .subscribed
-                    .insert(channel_id.clone(), subscribe);
                 let failed = if subscribe {
                     format!("Couldn't subscribe to {}.", quoted(&name))
                 } else {
                     format!("Couldn't unsubscribe from {}.", quoted(&name))
                 };
-                self.send_edit(
+                self.send_mark(
+                    channel_id.clone(),
+                    Mark::Subscribed(!subscribe),
+                    Mark::Subscribed(subscribe),
                     Edit::Subscribe {
-                        channel_id: channel_id.clone(),
+                        channel_id,
                         subscribe,
                     },
                     vec![
                         Target::browse("FEmusic_library_corpus_artists"),
                         LibraryTab::Artists.target(),
                     ],
-                    Pending {
-                        subject: channel_id.clone(),
-                        failed,
-                        duplicate: None,
-                        undo: Undo::Subscribed {
-                            id: channel_id,
-                            set: subscribe,
-                            before,
-                        },
-                    },
+                    failed,
                 );
             }
             AccountAction::Create {
@@ -965,39 +1036,80 @@ impl App {
                 }
                 let playlist = self.playlist_title(&playlist_id);
                 // The order after the move, from a page that lists both.
-                let Some((title, successor)) =
-                    self.playlist_pages(&playlist_id).iter().find_map(|p| {
-                        let rows = &entries(p)?.items;
-                        let from = rows
+                let Some(plan) = self.pages.iter().find_map(|(key, s)| {
+                    let page = s.page.as_ref()?;
+                    if !is_playlist_page(key, page, &playlist_id) {
+                        return None;
+                    }
+                    let shelf = entries(page)?;
+                    let rows = &shelf.items;
+                    let from = rows
+                        .iter()
+                        .position(|i| entry_of(i) == Some(set_video_id.as_str()))?;
+                    let to = rows
+                        .iter()
+                        .position(|i| entry_of(i) == Some(onto.as_str()))?;
+                    let mut order: Vec<&Item> = rows.iter().collect();
+                    let item = order.remove(from);
+                    order.insert(to, item);
+                    Some(MovePlan {
+                        key: key.clone(),
+                        shelf: page
+                            .shelves
                             .iter()
-                            .position(|i| entry_of(i) == Some(set_video_id.as_str()))?;
-                        let to = rows
-                            .iter()
-                            .position(|i| entry_of(i) == Some(onto.as_str()))?;
-                        let mut order: Vec<&Item> = rows.iter().collect();
-                        let item = order.remove(from);
-                        order.insert(to, item);
-                        Some((
-                            item.title.clone(),
-                            order.get(to + 1).map(|i| entry_of(i).map(str::to_owned)),
-                        ))
+                            .position(|s| std::ptr::eq(s, shelf))
+                            .unwrap_or(0),
+                        rows: rows.len(),
+                        more: shelf.continuation.clone(),
+                        title: item.title.clone(),
+                        successor: order.get(to + 1).map(|i| entry_of(i).map(str::to_owned)),
                     })
-                else {
+                }) else {
                     return;
                 };
-                let before = match successor {
+                let before = match plan.successor {
                     // Just added, not yet listed by YouTube Music.
                     Some(None) => {
                         self.push_error(format!(
                             "Couldn't move {} yet; {} is still saving. Try again in a moment.",
-                            quoted(&title),
+                            quoted(&plan.title),
                             quoted(&playlist)
                         ));
                         return;
                     }
                     Some(Some(entry)) => Some(entry),
-                    None => None,
+                    // Onto the last song loaded: with more to load, the song
+                    // after it isn't known yet. Moving with no successor
+                    // would put it at the end of the whole playlist, so the
+                    // next part is loaded first and the move made then.
+                    None => match plan.more {
+                        Some(token) => {
+                            if let Some(state) = self.pages.get_mut(&plan.key)
+                                && state.more_loading.insert(Some(plan.shelf))
+                            {
+                                self.backend.send(Command::More {
+                                    key: plan.key.clone(),
+                                    token,
+                                    search: false,
+                                    shelf: Some(plan.shelf),
+                                });
+                            }
+                            self.account_state.deferred_move = Some(DeferredMove {
+                                key: plan.key,
+                                rows: plan.rows,
+                                title: plan.title,
+                                action: AccountAction::Move {
+                                    playlist_id,
+                                    set_video_id,
+                                    onto,
+                                },
+                            });
+                            return;
+                        }
+                        None => None,
+                    },
                 };
+                let title = plan.title;
                 self.send_page_edit(
                     Edit::Move {
                         playlist_id: playlist_id.clone(),
@@ -1089,7 +1201,17 @@ impl App {
             return;
         };
         match result {
-            Ok(done) => self.confirm(op, done),
+            Ok(done) => {
+                let state = &mut self.account_state;
+                state
+                    .accepted
+                    .insert(pending.subject.clone(), Instant::now());
+                if let Some(mark) = pending.mark {
+                    state.confirmed.set(&pending.subject, mark);
+                    state.settle(&pending.subject, mark);
+                }
+                self.confirm(op, done);
+            }
             Err(failure) => {
                 let message = match (&failure, &pending.duplicate) {
                     (Failure::AlreadyInPlaylist, Some(duplicate)) => duplicate.clone(),
@@ -1108,10 +1230,26 @@ impl App {
                         format!("{} YouTube Music didn't accept it.", pending.failed)
                     }
                 };
-                // Let fetched pages speak for this id again.
-                self.account_state.changed.remove(&pending.subject);
-                self.account_state.overlays.retain(|o| o.op != op);
-                self.roll_back(pending.undo);
+                // Back to the newest change still on its way, or to what
+                // YouTube Music last said. Other changes to the same id keep
+                // their own standing against fetched pages.
+                match pending.mark {
+                    Some(mark) => self.account_state.settle(&pending.subject, mark),
+                    None => {
+                        self.account_state.overlays.retain(|o| o.op != op);
+                        let targets: Vec<Target> = self
+                            .account_state
+                            .bases
+                            .keys()
+                            .filter_map(|k| Some(self.pages.get(k)?.target.clone()))
+                            .collect();
+                        self.rebuild_pages();
+                        // YouTube Music's own copy, in case the bases lack rows loaded since.
+                        for target in targets {
+                            self.ensure_page(target, true);
+                        }
+                    }
+                }
                 self.push_error(message);
             }
         }
@@ -1148,64 +1286,11 @@ impl App {
         }
     }
 
-    fn roll_back(&mut self, undo: Undo) {
-        match undo {
-            Undo::Like {
-                video_id,
-                set,
-                before,
-            } => {
-                // A newer change to the same song wins.
-                if self.account_state.marks.likes.get(&video_id) == Some(&set) {
-                    let marks = self.marks_mut();
-                    match before {
-                        Some(b) => marks.likes.insert(video_id, b),
-                        None => marks.likes.remove(&video_id),
-                    };
-                }
-            }
-            Undo::Saved { id, set, before } => {
-                if self.account_state.marks.saved.get(&id) == Some(&set) {
-                    let marks = self.marks_mut();
-                    match before {
-                        Some(b) => marks.saved.insert(id, b),
-                        None => marks.saved.remove(&id),
-                    };
-                }
-            }
-            Undo::Subscribed { id, set, before } => {
-                if self.account_state.marks.subscribed.get(&id) == Some(&set) {
-                    let marks = self.marks_mut();
-                    match before {
-                        Some(b) => marks.subscribed.insert(id, b),
-                        None => marks.subscribed.remove(&id),
-                    };
-                }
-            }
-            // The pages as they were, with the other changes in force on
-            // top; then YouTube Music's own copy.
-            Undo::Pages(before) => {
-                for (key, page) in before {
-                    let Some(state) = self.pages.get_mut(&key) else {
-                        continue;
-                    };
-                    state.page = Some(page);
-                    let target = state.target.clone();
-                    self.apply_overlays(&key);
-                    self.ensure_page(target, true);
-                }
-            }
-        }
-    }
-
     /// Ratings fetched from YouTube Music (the playing song's watch-next).
     pub(crate) fn account_likes(&mut self, likes: Vec<(String, LikeStatus)>) {
         for (id, status) in likes {
             self.account_state.fetched_likes.insert(id.clone(), status);
-            let busy = self.account_state.subjects_in_flight();
-            if self.account_state.page_wins(&id, &busy) {
-                self.marks_mut().likes.insert(id, status);
-            }
+            self.account_state.heard(&id, Mark::Like(status));
         }
     }
 
@@ -1218,48 +1303,83 @@ impl App {
         }
     }
 
-    /// A copy of a page arrived (saved or fresh). The page changes still in
-    /// force are applied to it; and what a fresh copy says about likes,
-    /// library and subscriptions replaces the app's older marks.
+    /// A copy of a page arrived (saved or fresh). What a fresh copy says
+    /// about likes, library and subscriptions becomes what the app shows
+    /// (the queue's and player's copies of a song carry no rating of their
+    /// own); then the page changes still in force are applied to it.
     pub(crate) fn account_page_arrived(&mut self, key: &str, cached: bool) {
+        if !cached && let Some(page) = self.pages.get(key).and_then(|s| s.page.as_ref()) {
+            let mut heard: Vec<(String, Mark)> = page
+                .shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .filter_map(|i| i.track.as_ref())
+                .filter_map(|t| Some((t.video_id.clone(), Mark::Like(t.like?))))
+                .collect();
+            if let Some(h) = page.header.as_ref() {
+                if let Some(l) = &h.library {
+                    heard.push((l.playlist_id.clone(), Mark::Saved(l.saved)));
+                }
+                if let Some(s) = &h.subscription {
+                    heard.push((s.channel_id.clone(), Mark::Subscribed(s.subscribed)));
+                }
+            }
+            for (id, mark) in heard {
+                self.account_state.heard(&id, mark);
+            }
+        }
         self.apply_overlays(key);
-        if cached {
+    }
+
+    /// More rows of a page arrived: a move waiting for the rows after the
+    /// one it was dropped on is made now.
+    pub(crate) fn account_more_arrived(&mut self, key: &str) {
+        if self
+            .account_state
+            .deferred_move
+            .as_ref()
+            .is_none_or(|d| d.key != key)
+        {
             return;
         }
-        let Some(page) = self.pages.get(key).and_then(|s| s.page.as_ref()) else {
+        let Some(deferred) = self.account_state.deferred_move.take() else {
             return;
         };
-        let busy = self.account_state.subjects_in_flight();
-        let state = &self.account_state;
-        let likes: Vec<String> = page
-            .shelves
-            .iter()
-            .flat_map(|s| &s.items)
-            .filter_map(|i| i.track.as_ref())
-            .filter(|t| t.like.is_some() && state.page_wins(&t.video_id, &busy))
-            .map(|t| t.video_id.clone())
-            .collect();
-        let header = page.header.as_ref();
-        let saved = header
-            .and_then(|h| h.library.as_ref())
-            .map(|l| l.playlist_id.clone())
-            .filter(|id| state.page_wins(id, &busy));
-        let subscribed = header
-            .and_then(|h| h.subscription.as_ref())
-            .map(|s| s.channel_id.clone())
-            .filter(|id| state.page_wins(id, &busy));
-        if likes.is_empty() && saved.is_none() && subscribed.is_none() {
-            return;
-        }
-        let marks = self.marks_mut();
-        for id in likes {
-            marks.likes.remove(&id);
-        }
-        if let Some(id) = saved {
-            marks.saved.remove(&id);
-        }
-        if let Some(id) = subscribed {
-            marks.subscribed.remove(&id);
+        let rows = self
+            .pages
+            .get(key)
+            .and_then(|s| s.page.as_ref())
+            .and_then(entries)
+            .map_or(0, |s| s.items.len());
+        if rows > deferred.rows {
+            self.account_action(deferred.action);
+        } else {
+            self.push_error(format!(
+                "Couldn't move {}: the rest of the playlist didn't load. Try again.",
+                quoted(&deferred.title)
+            ));
         }
     }
+}
+
+/// Where a dragged song would land, worked out from a loaded page.
+struct MovePlan {
+    key: String,
+    /// The playlist's own list on that page.
+    shelf: usize,
+    rows: usize,
+    more: Option<String>,
+    title: String,
+    /// The entry after its new place: `None` past the last row loaded,
+    /// `Some(None)` when that row isn't saved yet.
+    successor: Option<Option<String>>,
+}
+
+/// A move waiting for the next part of the playlist to load.
+struct DeferredMove {
+    key: String,
+    /// Rows loaded when it was asked for.
+    rows: usize,
+    title: String,
+    action: AccountAction,
 }

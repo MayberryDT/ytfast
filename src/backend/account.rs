@@ -1,7 +1,9 @@
-//! Writes to the signed-in account (see `crate::account`). Each answer goes
-//! back stamped with the app's operation number; a few seconds after a
-//! success the pages it affects are asked for again, once YouTube Music
-//! shows the change.
+//! Writes to the signed-in account (see `crate::account`). They are made
+//! one at a time, in the order asked: a like then an unlike, or two moves
+//! in a playlist, reach YouTube Music in that order. Each answer goes back
+//! stamped with the app's operation number; a few seconds after a success
+//! the pages it affects are asked for again, once YouTube Music shows the
+//! change.
 
 use serde_json::{Value, json};
 
@@ -13,33 +15,27 @@ use crate::innertube::Edited;
 /// (docs/integration.md § Verified facts).
 const SETTLE: Duration = Duration::from_secs(3);
 
+/// One account write: its operation number, the edit, and the pages to
+/// fetch again once it shows.
+pub(super) struct Write {
+    op: u64,
+    edit: Edit,
+    refresh: Vec<Target>,
+}
+
 impl super::Worker {
-    pub(super) fn account_edit(&self, op: u64, edit: Edit, refresh: Vec<Target>) {
-        let client = self.client.clone();
-        let sink = self.sink.clone();
-        let internal = self.internal_tx.clone();
-        tokio::spawn(async move {
-            let result = run(&client, edit).await;
-            let result = match result {
-                Ok(done) => Ok(done),
-                Err(Answer::Api(ApiError::Auth)) => {
-                    let _ = internal.send(Internal::AuthFailed);
-                    Err(Failure::SignedOut)
-                }
-                Err(Answer::Api(ApiError::Offline(_))) => Err(Failure::Offline),
-                Err(Answer::Api(error)) => Err(Failure::Refused(error.to_string())),
-                Err(Answer::Refused(message)) if message.contains("already in") => {
-                    Err(Failure::AlreadyInPlaylist)
-                }
-                Err(Answer::Refused(message)) => Err(Failure::Refused(message)),
-            };
-            let ok = result.is_ok();
-            sink.send(Event::AccountEdited { op, result });
-            if ok && !refresh.is_empty() {
-                tokio::time::sleep(SETTLE).await;
-                sink.send(Event::AccountRefresh(refresh));
-            }
+    pub(super) fn account_edit(&mut self, op: u64, edit: Edit, refresh: Vec<Target>) {
+        let writes = self.account_writes.get_or_insert_with(|| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(writer(
+                self.client.clone(),
+                self.sink.clone(),
+                self.internal_tx.clone(),
+                rx,
+            ));
+            tx
         });
+        let _ = writes.send(Write { op, edit, refresh });
     }
 
     /// The account's rating of a song, fetched fresh.
@@ -53,6 +49,41 @@ impl super::Worker {
                 Err(error) => log::warn!("rating of {video_id}: {error}"),
             }
         });
+    }
+}
+
+/// Makes the account writes one after another.
+async fn writer(
+    client: Arc<Client>,
+    sink: Sink,
+    internal: mpsc::UnboundedSender<Internal>,
+    mut writes: mpsc::UnboundedReceiver<Write>,
+) {
+    while let Some(Write { op, edit, refresh }) = writes.recv().await {
+        let result = match run(&client, edit).await {
+            Ok(done) => Ok(done),
+            Err(Answer::Api(ApiError::Auth)) => {
+                let _ = internal.send(Internal::AuthFailed);
+                Err(Failure::SignedOut)
+            }
+            Err(Answer::Api(ApiError::Offline(_))) => Err(Failure::Offline),
+            Err(Answer::Api(error)) => Err(Failure::Refused(error.to_string())),
+            Err(Answer::Refused(message)) if message.contains("already in") => {
+                Err(Failure::AlreadyInPlaylist)
+            }
+            Err(Answer::Refused(message)) => Err(Failure::Refused(message)),
+        };
+        let ok = result.is_ok();
+        sink.send(Event::AccountEdited { op, result });
+        // The refetch waits for YouTube Music to list the change; the next
+        // write doesn't wait for it.
+        if ok && !refresh.is_empty() {
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(SETTLE).await;
+                sink.send(Event::AccountRefresh(refresh));
+            });
+        }
     }
 }
 
