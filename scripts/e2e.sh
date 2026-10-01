@@ -26,8 +26,9 @@
 #             covers under a light theme and back (changes the theme back)
 #   deck      Audition (Alt held over a song: main deck ducked and back, both songs
 #             moving, queue unchanged) and Smooth mixes (a radio's equal-power
-#             blend across two mpv decks; an album stays gapless on one); puts
-#             the volume, repeat, shuffle and the setting back
+#             blend across two mpv decks; Next during a blend completes it, Next
+#             again moves on; an album stays gapless on one); puts the volume,
+#             repeat, shuffle and the setting back
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in
