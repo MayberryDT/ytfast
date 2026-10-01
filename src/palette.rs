@@ -528,7 +528,12 @@ fn rank(app: &App, pa: &PlayAnything) -> Vec<Hit> {
     for target in library_targets() {
         library_keys.push(target.key());
         if let Some(page) = app.page_state(&target).and_then(|s| s.page.as_ref()) {
-            for item in page_items(page) {
+            // Liked Music's own list, not the Suggestions after it.
+            let items: Vec<&Item> = match crate::account::entries(page) {
+                Some(own) if target == Target::browse("VLLM") => own.items.iter().collect(),
+                _ => page_items(page).collect(),
+            };
+            for item in items {
                 add(item, Source::Library, &mut ranked);
             }
         }

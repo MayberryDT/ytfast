@@ -203,19 +203,27 @@ impl App {
             self.push_error("There's no radio for this.".into());
             return true;
         }
-        let mut tracks: Vec<Track> = page
-            .shelves
+        // A playlist's own list when it has one: YouTube Music's Suggestions
+        // come after it on the page and aren't in the playlist.
+        let shelves: Vec<(usize, &crate::model::Shelf)> = match crate::account::entries(page) {
+            Some(own) => page
+                .shelves
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| std::ptr::eq(*s, own))
+                .collect(),
+            None => page.shelves.iter().enumerate().collect(),
+        };
+        let mut tracks: Vec<Track> = shelves
             .iter()
-            .flat_map(|s| &s.items)
+            .flat_map(|(_, s)| &s.items)
             .filter_map(|i| i.track.clone())
             .collect();
         // A long playlist comes in parts: fetch the rest first.
-        let rest = page
-            .shelves
+        let rest = shelves
             .iter()
-            .enumerate()
             .rev()
-            .find_map(|(i, s)| Some((i, s.continuation.clone()?)));
+            .find_map(|(i, s)| Some((*i, s.continuation.clone()?)));
         if let Some((shelf, token)) = rest
             && tracks.len() < MOST
         {

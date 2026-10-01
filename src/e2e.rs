@@ -4241,6 +4241,61 @@ fn control() -> Vec<Step> {
             }
         }),
         wait("its page", 30.0, current_loaded),
+        // Its menu's Add to queue takes the playlist's songs, not the
+        // Suggestions YouTube Music lists after them.
+        wait("its Suggestions loaded", 30.0, |a| {
+            queue_playlist()
+                .and_then(|t| a.page_state(&t))
+                .is_some_and(|s| {
+                    !s.more_loading.contains(&None)
+                        && s.page.as_ref().is_some_and(|p| p.continuation.is_none())
+                })
+        }),
+        measure("saved_playlist_suggestions", |a| {
+            json!(queue_playlist().and_then(|t| {
+                let page = a.page_state(&t)?.page.as_ref()?;
+                let own = song_ids(page);
+                Some(
+                    page.shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .filter_map(|i| i.track.as_ref())
+                        .filter(|t| !own.contains(&t.video_id))
+                        .count(),
+                )
+            }))
+        }),
+        run("clear the upcoming songs", |a| {
+            a.backend.send(Command::ClearUpcoming)
+        }),
+        // Autoplay may follow the playing song; additions go ahead of it.
+        Step::Sleep(1.0),
+        click("More actions"),
+        Step::Sleep(0.3),
+        click("Add to queue"),
+        wait(
+            "Up next: the playlist's songs, then no Suggestion",
+            15.0,
+            |a| {
+                let Some(page) = queue_playlist().and_then(|t| a.page_state(&t)?.page.as_ref())
+                else {
+                    return false;
+                };
+                let own = song_ids(page);
+                let first_suggestion = page
+                    .shelves
+                    .iter()
+                    .flat_map(|s| &s.items)
+                    .filter_map(|i| i.track.as_ref())
+                    .map(|t| t.video_id.clone())
+                    .find(|id| !own.contains(id));
+                let next = upcoming(a, own.len() + 1);
+                !own.is_empty()
+                    && next[..own.len().min(next.len())] == own[..]
+                    && (first_suggestion.is_none()
+                        || next.get(own.len()) != first_suggestion.as_ref())
+            },
+        ),
         click("Delete playlist"),
         wait("delete dialog", 5.0, |a| dialog_open(a, "delete")),
         click("Delete"),
