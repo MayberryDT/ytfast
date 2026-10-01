@@ -58,8 +58,6 @@ pub(super) fn shelf_view(
     actions: &mut Vec<Action>,
 ) {
     let scroll_id = Id::new(("carousel", id.0, id.1));
-    // The id the scroll area stores its offset under, for the arrows.
-    let scroll_state = ui.make_persistent_id(scroll_id);
     let carousel = matches!(shelf.style, ShelfStyle::Carousel | ShelfStyle::RowCarousel);
     if !shelf.title.is_empty() || shelf.more.is_some() {
         ui.horizontal(|ui| {
@@ -81,10 +79,10 @@ pub(super) fn shelf_view(
                         )
                     };
                     if icon_button(ui, Icon::ChevronRight, 18.0, p.text, p, &right).clicked() {
-                        nudge(ui, scroll_state, scroll_id, 1.0);
+                        nudge(ui, scroll_id, 1.0);
                     }
                     if icon_button(ui, Icon::ChevronLeft, 18.0, p.text, p, &left).clicked() {
-                        nudge(ui, scroll_state, scroll_id, -1.0);
+                        nudge(ui, scroll_id, -1.0);
                     }
                     ui.add_space(4.0);
                 }
@@ -111,7 +109,7 @@ pub(super) fn shelf_view(
                     });
                 });
             remember_width(ui, scroll_id, out.inner_rect.width());
-            glide(ui, scroll_state, scroll_id, &out, CARD + GAP);
+            glide(ui, scroll_id, &out, CARD + GAP);
         }
         ShelfStyle::RowCarousel => {
             let out = ScrollArea::horizontal()
@@ -131,7 +129,7 @@ pub(super) fn shelf_view(
                     });
                 });
             remember_width(ui, scroll_id, out.inner_rect.width());
-            glide(ui, scroll_state, scroll_id, &out, 380.0 + 24.0);
+            glide(ui, scroll_id, &out, 380.0 + 24.0);
         }
         ShelfStyle::List => {
             for item in &shelf.items {
@@ -163,33 +161,28 @@ pub(super) fn shelf_view(
 }
 
 /// The arrows: glide by most of the visible width.
-fn nudge(ui: &Ui, id: Id, scroll_id: Id, direction: f32) {
-    let width: f32 = ui
-        .data(|d| d.get_temp(scroll_id.with("width")))
-        .unwrap_or(800.0);
-    if let Some(state) = egui::scroll_area::State::load(ui.ctx(), id) {
-        // Chained presses add up: start from where the glide is heading.
-        let from: f32 = ui
-            .data(|d| d.get_temp(scroll_id.with("target")))
-            .unwrap_or(state.offset.x);
-        let target = from + direction * (width - CARD).max(CARD);
-        ui.data_mut(|d| d.insert_temp(scroll_id.with("target"), target));
-    }
+fn nudge(ui: &Ui, scroll_id: Id, direction: f32) {
+    let (width, offset): (f32, f32) = ui.data(|d| {
+        (
+            d.get_temp(scroll_id.with("width")).unwrap_or(800.0),
+            d.get_temp(scroll_id.with("offset")).unwrap_or(0.0),
+        )
+    });
+    // Chained presses add up: start from where the glide is heading.
+    let from: f32 = ui
+        .data(|d| d.get_temp(scroll_id.with("target")))
+        .unwrap_or(offset);
+    let target = from + direction * (width - CARD).max(CARD);
+    ui.data_mut(|d| d.insert_temp(scroll_id.with("target"), target));
 }
 
 /// Moves a carousel towards its glide target, and once the wheel or touchpad
 /// lets go, settles it on the nearest card edge, like a physical strip.
-fn glide(
-    ui: &Ui,
-    state_id: Id,
-    scroll_id: Id,
-    out: &egui::scroll_area::ScrollAreaOutput<()>,
-    step: f32,
-) {
+fn glide(ui: &Ui, scroll_id: Id, out: &egui::scroll_area::ScrollAreaOutput<()>, step: f32) {
     let ctx = ui.ctx();
-    let Some(mut state) = egui::scroll_area::State::load(ctx, state_id) else {
-        return;
-    };
+    // egui derives the area's id from the salt in its own way: use the one it reports.
+    let mut state = out.state;
+    ctx.data_mut(|d| d.insert_temp(scroll_id.with("offset"), state.offset.x));
     let max = (out.content_size.x - out.inner_rect.width()).max(0.0);
     let now = ctx.input(|i| i.time);
     let last_key = scroll_id.with("last-scroll");
@@ -221,7 +214,7 @@ fn glide(
     let snapped = ((raw / step).round() * step).clamp(0.0, max);
     let x = super::motion::drive(ctx, scroll_id.with("glide"), state.offset.x, snapped, 220.0);
     state.offset.x = x;
-    state.store(ctx, state_id);
+    state.store(ctx, out.id);
     if x == snapped {
         ctx.data_mut(|d| d.remove::<f32>(target_key));
     } else {
