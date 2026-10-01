@@ -13,6 +13,9 @@ pub struct Settings {
     /// Show a desktop notification when the song changes (off by default).
     #[serde(default)]
     pub notifications: bool,
+    /// Draw covers outside Now Playing and Stage in the theme's colours (off by default).
+    #[serde(default)]
+    pub paint_covers: bool,
 }
 
 impl Settings {

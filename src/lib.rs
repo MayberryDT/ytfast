@@ -5,9 +5,11 @@ pub mod auth;
 pub mod backend;
 pub mod colors;
 pub mod covers;
+pub mod derived;
 pub mod desktop;
 #[cfg(feature = "e2e")]
 pub mod e2e;
+pub mod heat;
 pub mod icons;
 pub mod innertube;
 pub mod links;

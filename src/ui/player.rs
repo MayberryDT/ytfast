@@ -21,7 +21,16 @@ pub(super) fn player_bar(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<
         egui::WidgetType::Slider,
         "Seek",
     );
-    let active = response.hovered() || response.dragged();
+    // Most replayed: a low ridge above the line, fuller while the pointer is on either.
+    let on_ridge = super::ridge::player_ridge(
+        ui,
+        app,
+        bar,
+        response.hovered() || response.dragged(),
+        p,
+        actions,
+    );
+    let active = response.hovered() || response.dragged() || on_ridge;
     let duration = pb.duration.max(0.0);
     let pointer_fraction = response
         .interact_pointer_pos()

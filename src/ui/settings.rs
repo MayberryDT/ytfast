@@ -39,6 +39,15 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
         if response.changed() {
             actions.push(Action::Notifications(notifications));
         }
+        // Theme-painted covers: every cover outside Now Playing and Stage
+        // drawn in the theme's colours.
+        let mut paint = app.paint_covers;
+        let response = ui.checkbox(&mut paint, "Paint covers in theme colours");
+        #[cfg(feature = "e2e")]
+        crate::e2e::register(&response.ctx, "Paint covers", response.interact_rect);
+        if response.changed() {
+            actions.push(Action::PaintCovers(paint));
+        }
         ui.add_space(8.0);
         label(ui, "Account", 12.0, Weight::SemiBold, p.secondary);
         let status = match &app.account {

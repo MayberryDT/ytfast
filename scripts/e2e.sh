@@ -3,7 +3,7 @@
 # on this machine's desktop with the signed-in browser session. Run them from
 # the repository, on a machine you don't mind it taking over:
 #
-#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop]
+#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|surfaces]
 #
 #   journey   every surface, playback (Premium, gapless, seek, next), history
 #   recovery  signed out → Reconnect; a stream that fails once, one that keeps failing
@@ -15,6 +15,9 @@
 #   desktop   MPRIS via playerctl, playing on after close, `ytfast show|next|open`,
 #             a pasted link, the mini player, a song-change notification
 #             (needs playerctl and a notification daemon)
+#   surfaces  the most-replayed ridge (rest, hover) and the jump to the peak; Stage
+#             (flight, timed lyrics, frame times, chrome fading); theme-painted
+#             covers under a light theme and back (changes the theme back)
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in

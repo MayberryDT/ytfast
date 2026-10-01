@@ -203,7 +203,8 @@ pub(super) fn cover(
     ui.painter().rect_filled(rect, corner, p.surface);
     match url {
         Some(url) => {
-            egui::Image::new(url)
+            // In theme colours when that's on (outside Now Playing and Stage).
+            egui::Image::new(crate::derived::cover_source(ui.ctx(), url, rect.size()))
                 .corner_radius(corner)
                 .show_loading_spinner(false)
                 .paint_at(ui, rect);

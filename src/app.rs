@@ -161,6 +161,14 @@ pub enum Action {
     MiniPlayer(bool),
     /// Settings: song-change notifications on or off.
     Notifications(bool),
+    /// Open (`true`) or close Stage, the full-window cover and lyrics.
+    Stage(bool),
+    /// Inside Stage: the window to full screen and back (F11).
+    StageFullscreen,
+    /// Seek to the start of the playing song's most replayed part.
+    JumpToPeak,
+    /// Settings: covers outside Now Playing and Stage in theme colours.
+    PaintCovers(bool),
 }
 
 pub struct App {
@@ -228,6 +236,13 @@ pub struct App {
     pub started: Instant,
     /// How long the first frame took after launch.
     pub first_frame: Option<Duration>,
+    /// Most-replayed heat by video id: `None` when the song has none.
+    pub heat: HashMap<String, Option<Arc<crate::heat::Heat>>>,
+    heat_requested: HashSet<String>,
+    /// Covers outside Now Playing and Stage are drawn in the theme's colours.
+    pub paint_covers: bool,
+    /// Stage: the window filled with the cover and lyrics.
+    pub stage: crate::ui::stage::Stage,
     #[cfg(feature = "e2e")]
     pub e2e: Option<crate::e2e::Driver>,
     /// The desktop's palette has been applied once; later changes animate.
@@ -259,6 +274,7 @@ impl App {
             omarchy_previous_templates: &[],
             presets: false,
         });
+        let paint_covers = crate::settings::Settings::load(&paths).paint_covers;
         let mut app = Self {
             backend,
             palette,
@@ -307,6 +323,10 @@ impl App {
             #[cfg(feature = "e2e")]
             e2e: crate::e2e::Driver::from_env(),
             themed: false,
+            heat: HashMap::new(),
+            heat_requested: HashSet::new(),
+            paint_covers,
+            stage: crate::ui::stage::Stage::default(),
         };
         app.start_themes();
         app.ensure_page(View::Home.target(), false);
@@ -324,6 +344,9 @@ impl App {
             self.backend.runtime.clone(),
             self.backend.http.clone(),
             self.paths.clone(),
+        )));
+        ctx.add_image_loader(Arc::new(crate::derived::Loader::new(
+            self.backend.runtime.clone(),
         )));
         ctx.options_mut(|o| o.reduce_texture_memory = true);
         crate::theme::apply(ctx, &self.palette);
@@ -526,6 +549,9 @@ impl App {
                 self.profiles = list;
                 self.profile = current;
             }
+            Event::Heat { id, heat } => {
+                self.heat.insert(id, heat.map(Arc::new));
+            }
         }
     }
 
@@ -686,6 +712,66 @@ impl App {
                 self.desktop.notifications.store(on, Ordering::Relaxed);
                 self.backend.send(Command::Notifications(on));
             }
+            Action::Stage(open) => self.set_stage(ctx, open),
+            Action::StageFullscreen => {
+                if self.stage.open {
+                    let on = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+                    self.stage.fullscreen = on;
+                }
+            }
+            Action::JumpToPeak => {
+                if let Some(peak) = self.current_heat().and_then(|h| h.peak) {
+                    self.backend.send(Command::Seek(peak.start));
+                }
+            }
+            Action::PaintCovers(on) => {
+                self.paint_covers = on;
+                self.backend.send(Command::PaintCovers(on));
+            }
+        }
+    }
+
+    /// Opens or closes Stage: the cover flies between Stage and the place it
+    /// shows below it (Now Playing, or the player bar).
+    fn set_stage(&mut self, ctx: &egui::Context, open: bool) {
+        use crate::ui::motion;
+        let open = open && !self.queue.is_empty();
+        if open == self.stage.open {
+            return;
+        }
+        let (site, place) = if self.now_playing {
+            ("now-playing", motion::now_playing_site())
+        } else {
+            ("player", motion::player_site())
+        };
+        if open {
+            motion::launch_from_origin(ctx, site, Some(motion::stage_site()));
+        } else {
+            motion::launch_from_origin(ctx, "stage", Some(place));
+            if std::mem::take(&mut self.stage.fullscreen) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+        }
+        self.stage.open = open;
+        if open {
+            self.stage.opened += 1;
+        }
+        self.stage.clear_frames();
+    }
+
+    /// The playing song's most-replayed heat, once known (and if it has any).
+    pub fn current_heat(&self) -> Option<&crate::heat::Heat> {
+        self.heat.get(&self.current_track()?.video_id)?.as_deref()
+    }
+
+    /// Asks once for the playing song's most-replayed heat.
+    fn heat_frame(&mut self) {
+        let Some(id) = self.current_track().map(|t| t.video_id.clone()) else {
+            return;
+        };
+        if self.heat_requested.insert(id.clone()) {
+            self.backend.send(Command::Heat(id));
         }
     }
 
@@ -928,6 +1014,8 @@ impl App {
         self.theme_frame(&ctx);
         self.lyrics_frame();
         self.cover_frame(&ctx);
+        self.heat_frame();
+        crate::derived::paint_frame(&ctx, self.paint_covers.then_some(&self.palette));
 
         #[cfg(feature = "e2e")]
         let registry = crate::e2e::take_registry(&ctx);

@@ -122,6 +122,11 @@ pub fn now_playing_site() -> Id {
     Id::new("now-playing-cover")
 }
 
+/// Stage's huge cover.
+pub fn stage_site() -> Id {
+    Id::new("stage-cover")
+}
+
 fn flight_id() -> Id {
     Id::new("ytfast-flying-cover")
 }
@@ -256,9 +261,10 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
     let t = (now - claimed_at) as f32;
     // The place's own image may still be on its way: hold the cover there
     // until it is, rather than leave an empty frame.
+    let shown = crate::derived::cover_source(ctx, url, dest.size());
     let dest_ready = same_cover(&flight.url, url)
         || matches!(
-            egui::Image::new(url.to_owned()).load_for_size(ctx, dest.size()),
+            egui::Image::new(&*shown).load_for_size(ctx, dest.size()),
             Ok(egui::load::TexturePoll::Ready { .. })
         );
     if f64::from(t) >= FLIGHT && (dest_ready || f64::from(t) >= FLIGHT + 2.0) {
@@ -292,14 +298,15 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
     }
     // The cover that left is already decoded; when this place shows another
     // image (or another size of it), that one fades in as the cover lands.
-    egui::Image::new(flight.url.clone())
+    // Drawn as this place draws its covers (theme-painted or not).
+    egui::Image::new(crate::derived::cover_source(ctx, &flight.url, rect.size()))
         .corner_radius(corner)
         .show_loading_spinner(false)
         .paint_at(&over, rect);
     if dest_ready && !same_cover(&flight.url, url) {
         let fade = ((t / FLIGHT as f32 - 0.5) / 0.45).clamp(0.0, 1.0);
         if fade > 0.0 {
-            egui::Image::new(url.to_owned())
+            egui::Image::new(shown)
                 .corner_radius(corner)
                 .tint(egui::Color32::WHITE.gamma_multiply(fade))
                 .show_loading_spinner(false)

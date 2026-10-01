@@ -9,8 +9,10 @@ pub(crate) mod motion;
 mod now_playing;
 mod pages;
 mod player;
+mod ridge;
 mod settings;
 mod shelves;
+pub(crate) mod stage;
 mod widgets;
 
 use crate::app::{Action, App, WindowKind};
@@ -30,6 +32,10 @@ const GAP: f32 = 16.0;
 pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let p = app.palette.clone();
     keyboard(app, ui, actions);
+    if app.stage.open && !app.queue.is_empty() {
+        stage::stage(app, ui, actions);
+        return;
+    }
     if !app.queue.is_empty() {
         egui::Panel::bottom("player")
             .exact_size(PLAYER)
@@ -63,7 +69,9 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.painter().rect_filled(ui.max_rect(), 0.0, p.window);
         if app.now_playing {
             motion::clear_origin(ui.ctx(), "header");
-            now_playing(app, ui, &p, actions);
+            // Now Playing takes colour from the cover: never theme-painted.
+            let ctx = ui.ctx().clone();
+            crate::derived::without_paint(&ctx, || now_playing(app, ui, &p, actions));
         } else {
             motion::clear_origin(ui.ctx(), "now-playing");
             content(app, ui, &p, actions);
@@ -78,7 +86,7 @@ fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
         if !typing && i.key_pressed(egui::Key::Space) && !app.queue.is_empty() {
             actions.push(Action::Command(Command::TogglePause));
         }
-        if i.key_pressed(egui::Key::Escape) && app.now_playing {
+        if i.key_pressed(egui::Key::Escape) && app.now_playing && !app.stage.open {
             actions.push(Action::NowPlaying(false));
         }
         if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
@@ -90,5 +98,6 @@ fn keyboard(app: &App, ui: &Ui, actions: &mut Vec<Action>) {
         if i.modifiers.command && i.key_pressed(egui::Key::M) {
             actions.push(Action::MiniPlayer(app.window == WindowKind::Main));
         }
+        stage::keys(app, i, typing, actions);
     });
 }

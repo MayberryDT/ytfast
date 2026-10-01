@@ -41,6 +41,14 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
     if let Some(url) = url {
         motion::origin(ui.ctx(), "now-playing", url, art, 8.0);
     }
+    // A double click on the cover opens Stage.
+    let art_response = ui.interact(art, Id::new("now-playing-art"), Sense::click());
+    if named(art_response, "Now playing cover")
+        .on_hover_text("Double-click for Stage (F)")
+        .double_clicked()
+    {
+        actions.push(Action::Stage(true));
+    }
     if let Some(track) = current {
         let mut below = ui.new_child(
             egui::UiBuilder::new()
@@ -74,6 +82,15 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         below.add_space(24.0);
         if let Some(format) = &app.playback.format {
             label(&mut below, format, 12.0, Weight::Regular, p.dim);
+        }
+        // Where YouTube knows the most replayed part, a jump straight to it.
+        if app.current_heat().is_some_and(|h| h.peak.is_some()) {
+            below.add_space(10.0);
+            if super::widgets::pill(&mut below, "Jump to the most replayed part", None, false, p)
+                .clicked()
+            {
+                actions.push(Action::JumpToPeak);
+            }
         }
     }
 
