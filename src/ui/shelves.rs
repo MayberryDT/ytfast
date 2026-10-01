@@ -339,6 +339,12 @@ pub(super) fn row(
         Vec2::splat(40.0),
     );
     let show_index = item.index.is_some() && (item.thumbnail.is_none() || shelf_is_album(shelf));
+    // The cover is where a song row plays without touching a link; E2E runs
+    // click it by this name.
+    #[cfg(feature = "e2e")]
+    if item.track.is_some() {
+        crate::e2e::register(ui.ctx(), &format!("Play {}", item.title), thumb);
+    }
     if show_index {
         ui.painter().text(
             thumb.center(),

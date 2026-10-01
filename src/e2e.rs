@@ -1445,7 +1445,9 @@ fn pages() -> Vec<Step> {
     // A song without timed lyrics: plain lyrics, or the message.
     steps.extend(search("Debussy Clair de Lune"));
     steps.extend([
-        click_with("a song", |a| song_on_page(a, "Clair de Lune").map(|t| t.title)),
+        click_with("a song's cover", |a| {
+            song_on_page(a, "Clair de Lune").map(|t| format!("Play {}", t.title))
+        }),
         wait("another song playing", 90.0, move |a| {
             let id = a.current_track().map(|t| t.video_id.clone());
             let ours = |s: &Rc<RefCell<Option<crate::model::Track>>>| {
