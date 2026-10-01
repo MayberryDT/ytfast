@@ -232,14 +232,6 @@ pub struct App {
     playback_at: Instant,
     /// Recent searches, newest first.
     pub recent_searches: Vec<String>,
-    /// The playing song's cover colours (for Now Playing and Stage), `None`
-    /// until worked out or when the cover has none.
-    pub cover_colors: Option<crate::colors::CoverColors>,
-    cover_extractor: crate::colors::Extractor,
-    /// Now Playing's move from the previous cover's colours.
-    pub cover_fade: crate::colors::Fade,
-    /// The cover `cover_colors` were taken from.
-    pub cover_url: Option<String>,
     last_prepared: Option<String>,
     page_seq: u64,
     pub errors: Vec<String>,
@@ -335,10 +327,6 @@ impl App {
             lyrics_requested: HashSet::new(),
             playback_at: Instant::now(),
             recent_searches: Vec::new(),
-            cover_colors: None,
-            cover_extractor: crate::colors::Extractor::default(),
-            cover_fade: crate::colors::Fade::default(),
-            cover_url: None,
             last_prepared: None,
             page_seq: 0,
             errors: Vec::new(),
@@ -1047,30 +1035,6 @@ impl App {
         }
     }
 
-    /// Works out the playing cover's colours off this thread and starts
-    /// Now Playing's move to them when they change.
-    fn cover_frame(&mut self, ctx: &egui::Context) {
-        let Some(url) = self
-            .playback
-            .index
-            .and_then(|i| self.queue.get(i))
-            .and_then(|t| t.thumbnail.as_deref())
-        else {
-            return;
-        };
-        let Some(colors) = self.cover_extractor.get(ctx, &self.backend.runtime, url) else {
-            return;
-        };
-        if colors != self.cover_colors {
-            self.cover_fade
-                .start(self.cover_colors.as_ref(), &self.palette);
-            self.cover_colors = colors;
-        }
-        if self.cover_url.as_deref() != Some(url) {
-            self.cover_url = Some(url.to_owned());
-        }
-    }
-
     /// Playback edits show in the same frame; the backend's state follows.
     fn optimistic(&mut self, command: &Command) {
         let current = self.playback.index;
@@ -1203,7 +1167,6 @@ impl App {
         self.prepare_on_screen();
         self.theme_frame(&ctx);
         self.lyrics_frame();
-        self.cover_frame(&ctx);
         self.heat_frame();
         crate::derived::paint_frame(&ctx, self.paint_covers.then_some(&self.palette));
         self.control_frame(&ctx);

@@ -2150,35 +2150,47 @@ fn lyric_index(app: &App) -> Option<usize> {
     crate::lyrics::current_line(timed_lines(app)?, app.position_now())
 }
 
-/// The playing cover's colours are worked out (not the previous song's).
-fn cover_colours_ready(app: &App) -> bool {
-    let cover = app.current_track().and_then(|t| t.thumbnail.as_deref());
-    cover.is_some() && app.cover_url.as_deref() == cover
+/// Whether the saved screenshot `shot` shows the theme's window colour down
+/// the window's right edge, from 30% to 60% of its height: the margin Now
+/// Playing and Stage leave bare, where colour taken from a cover would show.
+fn theme_background(app: &App, shot: &str) -> Value {
+    let hex = |r: u8, g: u8, b: u8| format!("#{r:02x}{g:02x}{b:02x}");
+    let Some(dir) = std::env::var_os("YTFAST_E2E_DIR") else {
+        return json!({"ok": false, "why": "no artifact directory"});
+    };
+    let path = PathBuf::from(dir).join(format!("{shot}.png"));
+    let image = match image::open(&path) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => return json!({"ok": false, "why": format!("{}: {error}", path.display())}),
+    };
+    let (width, height) = image.dimensions();
+    let want = app.palette.window;
+    let near = |a: u8, b: u8| a.abs_diff(b) <= 2;
+    let off: Vec<String> = (height * 3 / 10..height * 6 / 10)
+        .step_by(8)
+        .filter_map(|y| {
+            let p = image.get_pixel(width.saturating_sub(4), y);
+            let theme = near(p[0], want.r()) && near(p[1], want.g()) && near(p[2], want.b());
+            (!theme).then(|| format!("y {y}: {}", hex(p[0], p[1], p[2])))
+        })
+        .collect();
+    json!({
+        "ok": off.is_empty(),
+        "theme_window": hex(want.r(), want.g(), want.b()),
+        "theme_dark": app.palette.dark,
+        "off": off.iter().take(5).collect::<Vec<_>>(),
+    })
 }
 
-/// The cover's extracted colours and what Now Playing makes of them under
-/// the current theme, with contrast ratios against the wash's two ends.
-fn cover_record(app: &App) -> Value {
-    let hex = |c: egui::Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
-    let wash = crate::colors::Wash::new(app.cover_colors.as_ref(), &app.palette);
-    let worst = |c: egui::Color32| {
-        crate::colors::contrast(c, wash.top).min(crate::colors::contrast(c, wash.bottom))
-    };
-    let track = app.current_track();
-    json!({
-        "video_id": track.map(|t| t.video_id.clone()),
-        "title": track.map(|t| t.title.clone()),
-        "theme_dark": app.palette.dark,
-        "deep": app.cover_colors.map(|c| hex(c.deep)),
-        "accent": app.cover_colors.map(|c| hex(c.accent)),
-        "neutral": app.cover_colors.map(|c| c.neutral),
-        "wash_top": hex(wash.top),
-        "wash_bottom": hex(wash.bottom),
-        "text": hex(wash.text),
-        "accent_shown": hex(wash.accent),
-        "contrast_text": worst(wash.text),
-        "contrast_secondary": worst(wash.secondary),
-        "contrast_accent": worst(wash.accent),
+/// Records [`theme_background`] for a screenshot just taken.
+fn background(name: &'static str, shot: &'static str) -> Step {
+    measure(name, move |a| theme_background(a, shot))
+}
+
+/// Fails unless the screenshot just taken shows the theme's background.
+fn on_theme(what: &'static str, shot: &'static str) -> Step {
+    wait(what, 1.0, move |a| {
+        theme_background(a, shot)["ok"] == json!(true)
     })
 }
 
@@ -2216,8 +2228,9 @@ fn searched(app: &App) -> bool {
 }
 
 /// Now Playing and pages (docs/SPEC.md § Now Playing and pages): Home's mood
-/// chips, Library → History, an artist's See all, recent searches, the cover
-/// wash for two different covers under the current and a light theme, timed
+/// chips, Library → History, an artist's See all, recent searches, Now
+/// Playing on the theme's colours for two different covers under the current
+/// and a light theme, timed
 /// lyrics following the song and seeking by line, and a song without timed
 /// lyrics. Restores the theme and the recent searches it found.
 fn pages() -> Vec<Step> {
@@ -2394,20 +2407,20 @@ fn pages() -> Vec<Step> {
         }),
         click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
-        wait("cover A colours", 30.0, cover_colours_ready),
         Step::Sleep(1.5),
         Step::Screenshot("p08-now-playing-a"),
-        measure("cover_a", cover_record),
+        background("background_a", "p08-now-playing-a"),
+        on_theme("Now Playing A on the theme's background", "p08-now-playing-a"),
         click_with("song B in Up next", move |_| {
             b3.borrow().as_ref().map(|t| t.title.clone())
         }),
         wait("song B playing", 90.0, |a| {
             a.playback.index == Some(1) && a.playback.playing && a.playback.position > 0.5
         }),
-        wait("cover B colours", 30.0, cover_colours_ready),
         Step::Sleep(1.5),
         Step::Screenshot("p09-now-playing-b"),
-        measure("cover_b", cover_record),
+        background("background_b", "p09-now-playing-b"),
+        on_theme("Now Playing B on the theme's background", "p09-now-playing-b"),
         // Timed lyrics follow the song.
         click("LYRICS"),
         wait("timed lyrics", 45.0, |a| timed_lines(a).is_some()),
@@ -2463,17 +2476,18 @@ fn pages() -> Vec<Step> {
         click("UP NEXT"),
         Step::Sleep(1.0),
         Step::Screenshot("p12-now-playing-b-light"),
-        measure("cover_b_light", cover_record),
+        background("background_b_light", "p12-now-playing-b-light"),
+        on_theme("Now Playing B on the light theme's background", "p12-now-playing-b-light"),
         click_with("song A in Up next", move |_| {
             a3.borrow().as_ref().map(|t| t.title.clone())
         }),
         wait("song A again", 90.0, |a| {
             a.playback.index == Some(0) && a.playback.playing && a.playback.position > 0.5
         }),
-        wait("cover A colours again", 30.0, cover_colours_ready),
         Step::Sleep(1.5),
         Step::Screenshot("p13-now-playing-a-light"),
-        measure("cover_a_light", cover_record),
+        background("background_a_light", "p13-now-playing-a-light"),
+        on_theme("Now Playing A on the light theme's background", "p13-now-playing-a-light"),
         run("switch the theme back", move |_| set_theme(&original)),
         wait("dark colours", 120.0, |a| a.palette.dark),
         Step::Sleep(2.0),
@@ -3193,8 +3207,9 @@ fn engine_restore() -> Vec<Step> {
 
 /// Signature surfaces (docs/SPEC.md § Signature moments): the most-replayed
 /// ridge on the player bar at rest and under the pointer, the jump to the
-/// most replayed part, Stage (the cover's flight in, timed lyrics, frame
-/// times, the chrome fading, the flight back), and theme-painted covers
+/// most replayed part, Stage (the cover's flight in, timed lyrics, the
+/// theme's background, frame times, the chrome fading, the flight back), and
+/// theme-painted covers
 /// across a switch to a light theme and back. Restores the theme, the
 /// setting and the recent searches it found.
 fn surfaces() -> Vec<Step> {
@@ -3285,6 +3300,8 @@ fn surfaces() -> Vec<Step> {
         Step::Sleep(1.5),
         Step::Screenshot("s05-stage"),
         measure("stage_chrome_shown", |a| json!(a.stage.chrome)),
+        background("stage_background", "s05-stage"),
+        on_theme("Stage on the theme's background", "s05-stage"),
         run("count Stage's frames from here", |a| a.stage.clear_frames()),
         Step::Sleep(3.0),
         measure("stage_frames", |a| {

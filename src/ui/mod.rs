@@ -77,7 +77,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.painter().rect_filled(ui.max_rect(), 0.0, p.window);
         if app.now_playing {
             motion::clear_origin(ui.ctx(), "header");
-            // Now Playing takes colour from the cover: never theme-painted.
+            // Now Playing shows the real cover, even with theme-painted covers on.
             let ctx = ui.ctx().clone();
             crate::derived::without_paint(&ctx, || now_playing(app, ui, &p, actions));
         } else {

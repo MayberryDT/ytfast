@@ -14,16 +14,6 @@ use egui::{
 use fastframe_fonts::Weight;
 
 pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
-    // Now Playing takes its colour from the cover: a wash in the cover's
-    // hue, and text and accent chosen to read on it. It moves to the next
-    // cover's colours when the song changes.
-    let (wash, moving) = app.cover_fade.wash(app.cover_colors.as_ref(), p);
-    wash.paint(ui.painter(), ui.max_rect());
-    if moving {
-        ui.ctx().request_repaint();
-    }
-    let tinted = wash.palette(p);
-    let p = &tinted;
     let area = ui.max_rect().shrink2(vec2(40.0, 24.0));
     let side = 440.0_f32.min(area.width() * 0.45);
     let art_area = Rect::from_min_max(area.min, pos2(area.right() - side - 40.0, area.bottom()));

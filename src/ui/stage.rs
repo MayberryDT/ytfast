@@ -1,9 +1,8 @@
 //! Stage: the music fills the window (`F`, or a double click on Now
 //! Playing's cover; `F` or `Esc` leaves, `F11` goes full screen). A huge,
-//! sharp cover over a softened field made from the cover itself, timed
-//! lyrics in large type beside or below it, and a minimal transport that
-//! fades away while the pointer rests. Colours come from the cover (the
-//! Now Playing wash), so text stays legible over any theme.
+//! sharp cover on the theme's background, timed lyrics in large type beside
+//! or below it, and a minimal transport that fades away while the pointer
+//! rests. Colours come from the Omarchy theme; only the cover is its own.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -21,10 +20,8 @@ use fastframe_fonts::Weight;
 
 /// Chrome fades after the pointer rests this long (seconds).
 const IDLE: f32 = 2.5;
-/// A song change: covers, field, titles and lyrics trade places.
+/// A song change: covers, titles and lyrics trade places.
 const HANDOFF: f64 = 0.6;
-/// The softened field's crossfade (seconds).
-const FIELD_FADE: f64 = 0.7;
 /// Frames kept for the frame-time measurement.
 const FRAMES: usize = 1200;
 
@@ -74,7 +71,7 @@ pub(super) fn stage(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     app.stage.record(ctx.input(|i| i.stable_dt));
     let chrome = egui::CentralPanel::no_frame()
         .show(ui, |ui| {
-            // Stage takes colour from the cover: never theme-painted.
+            // Stage shows the real cover, even with theme-painted covers on.
             crate::derived::without_paint(&ctx, || draw(app, ui, actions))
         })
         .inner;
@@ -92,60 +89,6 @@ fn texture(ctx: &egui::Context, uri: &str, size: Vec2) -> Option<egui::TextureId
         Ok(egui::load::TexturePoll::Ready { texture }) => Some(texture.id),
         _ => None,
     }
-}
-
-/// The part of a square texture that fills `rect` without stretching.
-fn cover_uv(rect: Rect) -> Rect {
-    let aspect = rect.width() / rect.height().max(1.0);
-    if aspect >= 1.0 {
-        let h = 1.0 / aspect;
-        Rect::from_min_max(pos2(0.0, 0.5 - h / 2.0), pos2(1.0, 0.5 + h / 2.0))
-    } else {
-        Rect::from_min_max(pos2(0.5 - aspect / 2.0, 0.0), pos2(0.5 + aspect / 2.0, 1.0))
-    }
-}
-
-#[derive(Clone, Default)]
-struct Field {
-    shown: Option<String>,
-    previous: Option<String>,
-    since: f64,
-}
-
-/// The softened field: the cover blurred across the window. A new cover's
-/// field (or the same cover under the other kind of theme) fades in over
-/// the old one once it is made; until then the old one stays.
-fn field(ui: &Ui, rect: Rect, wanted: Option<String>) {
-    let ctx = ui.ctx();
-    let id = Id::new("stage-field");
-    let now = ctx.input(|i| i.time);
-    let mut f: Field = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
-    if let Some(w) = wanted
-        && f.shown.as_ref() != Some(&w)
-        && texture(ctx, &w, rect.size()).is_some()
-    {
-        f.previous = f.shown.replace(w);
-        f.since = now;
-    }
-    let t = motion::ease_out(((now - f.since) / FIELD_FADE) as f32);
-    if t < 1.0 {
-        ctx.request_repaint();
-    } else {
-        f.previous = None;
-    }
-    let uv = cover_uv(rect);
-    let painter = ui.painter();
-    if let Some(previous) = &f.previous
-        && let Some(texture) = texture(ctx, previous, rect.size())
-    {
-        painter.image(texture, rect, uv, Color32::WHITE);
-    }
-    if let Some(shown) = &f.shown
-        && let Some(texture) = texture(ctx, shown, rect.size())
-    {
-        painter.image(texture, rect, uv, Color32::WHITE.gamma_multiply(t));
-    }
-    ctx.data_mut(|d| d.insert_temp(id, f));
 }
 
 /// The cover, huge: a soft shadow, the cover, and its sharper copy once loaded.
@@ -260,20 +203,10 @@ fn layout(content: Rect, presence: f32) -> Layout {
 fn draw(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) -> f32 {
     let ctx = ui.ctx().clone();
     let rect = ui.max_rect();
-    let (wash, moving) = app.cover_fade.wash(app.cover_colors.as_ref(), &app.palette);
-    if moving {
-        ctx.request_repaint();
-    }
-    let tinted = wash.palette(&app.palette);
-    let p = &tinted;
-    wash.paint(ui.painter(), rect);
+    let p = &app.palette;
+    ui.painter().rect_filled(rect, 0.0, p.window);
     let track = app.current_track();
     let url = track.and_then(|t| t.thumbnail.as_deref());
-    field(
-        ui,
-        rect,
-        url.map(|u| crate::derived::soft_uri(u, app.palette.dark)),
-    );
 
     let margin = (rect.width().min(rect.height()) * 0.06).max(24.0);
     let transport = 112.0;

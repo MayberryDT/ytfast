@@ -27,8 +27,8 @@ The YouTube Music you know, with its own feel:
 
 - **Covers that fly.** Open an album and its cover lifts out of the card into the page; Back sends it home. Songs fly into the player, and Now Playing opens out of it.
 - **Song changes you see but never hear.** Playback is gapless; at the change the next cover and title roll into the player.
-- **Now Playing in the cover's colours**, with lyrics that follow the song line by line (from YouTube Music, or [LRCLIB](https://lrclib.net) when it has none). Click a line to jump there.
-- **Stage** (`F`): the cover, a field made from it and large lyrics fill the window. For a second screen or a party.
+- **Now Playing** with lyrics that follow the song line by line (from YouTube Music, or [LRCLIB](https://lrclib.net) when it has none). Click a line to jump there.
+- **Stage** (`F`): the cover and large lyrics fill the window. For a second screen or a party.
 - **The most replayed part**: a ridge along the seek bar shows where everyone replays a song, with a jump to the peak.
 - **Audition**: hold `Alt` (or the middle button) on any song to hear its best part over your music, which dips and comes back. Your queue never changes.
 - **Smooth mixes**: radios and mixes can blend from song to song. Albums stay gapless.

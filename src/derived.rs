@@ -1,12 +1,11 @@
-//! Images made from covers: Stage's softened field and covers painted in
-//! the theme's colours.
+//! Covers painted in the theme's colours (Settings → Paint covers in theme
+//! colours).
 //!
-//! An egui image loader for `ytfast-soft://<dark|light>/<cover url>` and
-//! `ytfast-paint://<colours>/<cover url>`. It takes the cover's bytes from
-//! the cover loader (the same ones the plain cover is drawn from), works on
-//! them off the interface thread, and answers `Pending` until done. Each
-//! result is small and made once per cover (and palette); drawing it costs
-//! one textured rectangle.
+//! An egui image loader for `ytfast-paint://<colours>/<cover url>`. It takes
+//! the cover's bytes from the cover loader (the same ones the plain cover is
+//! drawn from), paints them off the interface thread, and answers `Pending`
+//! until done. Each result is small and made once per cover and palette;
+//! drawing it costs one textured rectangle.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -17,133 +16,15 @@ use egui::{Color32, ColorImage, Context, Id, Vec2};
 
 use crate::theme::Palette;
 
-const SOFT: &str = "ytfast-soft://";
 const PAINT: &str = "ytfast-paint://";
-/// The softened field's size: blurred this small, it is drawn stretched
-/// across the window with linear filtering.
-const SOFT_SIZE: u32 = 72;
 /// A painted cover's largest side (the page header's cover at 1.5×).
 const PAINT_SIZE: u32 = 360;
-
-/// Stage's softened field for the cover at `url`: blurred, its light held
-/// in the band the cover wash keeps text legible on (dark or light theme).
-pub fn soft_uri(url: &str, dark: bool) -> String {
-    format!("{SOFT}{}/{url}", if dark { "dark" } else { "light" })
-}
 
 fn paint_uri(key: &str, url: &str) -> String {
     format!("{PAINT}{key}/{url}")
 }
 
 // ---- making the images ----
-
-fn to_linear(c: u8) -> f32 {
-    let c = f32::from(c) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn from_linear(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let s = if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (s * 255.0).round() as u8
-}
-
-fn luminance([r, g, b]: [f32; 3]) -> f32 {
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-/// One pass of a box blur along rows (`stride` 1) or columns (`stride` = width).
-fn box_pass(src: &[[f32; 3]], dst: &mut [[f32; 3]], size: usize, radius: usize, rows: bool) {
-    let window = (2 * radius + 1) as f32;
-    for line in 0..size {
-        let at = |i: usize| -> usize {
-            if rows {
-                line * size + i
-            } else {
-                i * size + line
-            }
-        };
-        let clamped = |i: isize| at(i.clamp(0, size as isize - 1) as usize);
-        let mut sum = [0.0_f32; 3];
-        for i in -(radius as isize)..=radius as isize {
-            let p = src[clamped(i)];
-            for (s, v) in sum.iter_mut().zip(p) {
-                *s += v;
-            }
-        }
-        for i in 0..size {
-            dst[at(i)] = sum.map(|s| s / window);
-            let leaving = src[clamped(i as isize - radius as isize)];
-            let entering = src[clamped(i as isize + radius as isize + 1)];
-            for ((s, e), l) in sum.iter_mut().zip(entering).zip(leaving) {
-                *s += e - l;
-            }
-        }
-    }
-}
-
-/// The cover, small and heavily blurred (three box passes each way, close
-/// to a gaussian), its lightness moved into a narrow band: a calm field
-/// in the cover's own colours that text reads on.
-fn soften(bytes: &[u8], dark: bool) -> Option<ColorImage> {
-    let image = image::load_from_memory(bytes).ok()?;
-    let small = image.thumbnail_exact(SOFT_SIZE, SOFT_SIZE).to_rgb8();
-    let size = SOFT_SIZE as usize;
-    if small.width() as usize != size || small.height() as usize != size {
-        return None;
-    }
-    let mut a: Vec<[f32; 3]> = small
-        .pixels()
-        .map(|p| [to_linear(p[0]), to_linear(p[1]), to_linear(p[2])])
-        .collect();
-    let mut b = a.clone();
-    let radius = size / 9;
-    for _ in 0..3 {
-        box_pass(&a, &mut b, size, radius, true);
-        box_pass(&b, &mut a, size, radius, false);
-    }
-    // Perceptual lightness (cube root of luminance) mapped into the band;
-    // colour kept as a ratio to the luminance and pushed up (a dim field
-    // otherwise reads as grey) as far as it goes without leaving the gamut,
-    // so the lightness stays where it was put.
-    let (lo, hi, colour) = if dark {
-        (0.18_f32, 0.30_f32, 1.8_f32)
-    } else {
-        (0.90, 0.96, 1.15)
-    };
-    let pixels = a
-        .iter()
-        .map(|&rgb| {
-            let y = luminance(rgb).max(1e-5);
-            let l = lo + (hi - lo) * y.cbrt();
-            let target = l * l * l;
-            let scaled = rgb.map(|c| c * target / y);
-            let mut amount = colour;
-            for c in scaled {
-                if c > target {
-                    amount = amount.min((1.0 - target) / (c - target));
-                } else if c < target {
-                    amount = amount.min(target / (target - c));
-                }
-            }
-            let out = scaled.map(|c| target + (c - target) * amount.max(0.0));
-            Color32::from_rgb(
-                from_linear(out[0]),
-                from_linear(out[1]),
-                from_linear(out[2]),
-            )
-        })
-        .collect();
-    Some(ColorImage::new([size, size], pixels))
-}
 
 /// The theme colours a cover is painted in: its shadows in the darker of
 /// the theme's background and text, its highlights in the lighter, the
@@ -286,25 +167,11 @@ fn paint(bytes: &[u8], paint: Paint) -> Option<ColorImage> {
     Some(ColorImage::new([w, h], pixels))
 }
 
-enum Job {
-    Soft { dark: bool },
-    Paint(Paint),
-}
-
 /// What a derived URI asks for, and the cover it is made from.
-fn job(uri: &str) -> Option<(Job, &str)> {
-    if let Some(rest) = uri.strip_prefix(SOFT) {
-        let (mode, url) = rest.split_once('/')?;
-        let dark = match mode {
-            "dark" => true,
-            "light" => false,
-            _ => return None,
-        };
-        return Some((Job::Soft { dark }, url));
-    }
+fn job(uri: &str) -> Option<(Paint, &str)> {
     let rest = uri.strip_prefix(PAINT)?;
     let (key, url) = rest.split_once('/')?;
-    Some((Job::Paint(Paint::parse(key)?), url))
+    Some((Paint::parse(key)?, url))
 }
 
 enum Slot {
@@ -368,13 +235,10 @@ impl ImageLoader for Loader {
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             let _permit = permits.acquire().await;
-            let made = tokio::task::spawn_blocking(move || match job {
-                Job::Soft { dark } => soften(&bytes, dark),
-                Job::Paint(colours) => paint(&bytes, colours),
-            })
-            .await
-            .ok()
-            .flatten();
+            let made = tokio::task::spawn_blocking(move || paint(&bytes, job))
+                .await
+                .ok()
+                .flatten();
             let slot = match made {
                 Some(image) => Slot::Ready(Arc::new(image)),
                 None => Slot::Failed("the cover couldn't be read".into()),
@@ -481,8 +345,8 @@ pub fn paint_frame(ctx: &Context, palette: Option<&Palette>) {
     }
 }
 
-/// Runs `draw` with covers left unpainted (Now Playing and Stage take their
-/// colour from the cover itself).
+/// Runs `draw` with covers left unpainted: Now Playing and Stage always show
+/// the real cover.
 pub fn without_paint<R>(ctx: &Context, draw: impl FnOnce() -> R) -> R {
     let was = ctx.data_mut(|d| {
         let s = d.get_temp_mut_or_default::<PaintState>(state_id());

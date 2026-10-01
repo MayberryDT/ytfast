@@ -4,7 +4,6 @@ pub mod account;
 pub mod app;
 pub mod auth;
 pub mod backend;
-pub mod colors;
 pub mod control;
 pub mod covers;
 pub mod derived;

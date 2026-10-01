@@ -16,7 +16,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 | Name | Shown to people as **Music** (launcher, window title, sidebar); `ytfast` everywhere internal (binary, window class, config and cache folders). |
 | Account | Signed in with cookies read from a signed-in Chromium-family browser profile. By default that's the most recently used one; Settings lists the signed-in profiles (different browsers can hold different Google accounts) and the choice is remembered. |
 | Media | Audio only. No music videos, ever. Highest available quality (with Premium, Opus at ~256 kbps, itag 774). |
-| Look | Similar to YouTube Music in places and labels; ytfast's own motion and presentation. Colours follow the active Omarchy theme and are never hard-coded; Now Playing and Stage also take colour from the current cover. |
+| Look | Similar to YouTube Music in places and labels; ytfast's own motion and presentation. Colours follow the active Omarchy theme everywhere, Now Playing and Stage included, and are never hard-coded; only cover art keeps its own colours. |
 | Write-back | ytfast acts on the account like YouTube Music does: plays reported to history, likes and dislikes, saving albums and playlists to the library, subscribing to artists, and creating, editing and deleting playlists. |
 | Desktop integration | A full Omarchy citizen: MPRIS (media keys, `playerctl`, the shell's media widget), playing on after the window closes with an icon in the tray, a command line that drives the running app, optional song-change notifications, and a compact mini player. |
 | Other services | Only LRCLIB, which supplies timed lyrics when YouTube Music has none. No scrobbling or presence services (Last.fm, ListenBrainz, Discord). |
@@ -90,8 +90,8 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 ytfast keeps YouTube Music's map but has its own feel. Every moment answers input in the same frame, never delays audio or navigation, and can be interrupted.
 
 - **The cover flies:** opening an album, playlist, artist or Now Playing grows the clicked cover into its new place; Back reverses it.
-- **The handoff:** at a song change the next cover slides in from Up next, the title rolls over and the colours shift, in time with the audio.
-- **Stage:** `F` fills the window with the cover, a softened cover-coloured field and large timed lyrics; clicking a line seeks to it.
+- **The handoff:** at a song change the next cover slides in from Up next and the title rolls over, in time with the audio.
+- **Stage:** `F` fills the window with the cover and large timed lyrics on the theme's background; clicking a line seeks to it.
 - **Most-replayed seek bar:** where YouTube has replay data, the seek bar shows it as a ridge with a jump to the peak.
 - **Audition:** holding a key on any song plays its best part over the ducked current song, without touching the queue or history.
 - **Theme-painted covers:** an optional mode draws every cover in the theme's colours and repaints on a theme switch.
@@ -102,7 +102,7 @@ ytfast keeps YouTube Music's map but has its own feel. Every moment answers inpu
 ## Fixed architecture and protected constraints
 
 - Native Rust + egui (eframe, glow backend) on the `crmne/egui apps-0.36` and `crmne/winit apps-0.30` fork revisions used by ZapFast and Spotifast. Reuse `fastframe` crates (theme, fonts, icons, text, log) at one pinned tag. No browser engine or webview anywhere.
-- Colours come only from the active Omarchy theme through a `fastframe-theme` palette, following theme changes live, except that Now Playing and Stage take colour from the current cover (Tyler, 2026-10-01). The UI must read well across any Omarchy theme.
+- Colours come only from the active Omarchy theme through a `fastframe-theme` palette, following theme changes live; cover art is the only thing shown in its own colours (Tyler, 2026-10-01). The UI must read well across any Omarchy theme.
 - Credentials: cookie values never enter logs, crash reports, the repository or world-readable files. Any derived cookie file is 0600 in the user's runtime directory. The Chromium cookie key is treated the same way.
 - No telemetry and no ytfast-operated services. The only network peers are YouTube/Google endpoints, the stream CDN and LRCLIB.
 
@@ -123,5 +123,5 @@ A version is complete when the following are observed with a real YouTube Music 
 7. **Control:** an E2E run uses only the keyboard for search, playback, volume, like and navigation; uses Play next, Add to queue and queue reordering, and the songs then play in the shown order; changes an equalizer preset and observes it applied in mpv; and after a relaunch finds the same queue, song, position and equalizer.
 8. **Desktop:** `playerctl` reads metadata and controls playback; with the window closed the music keeps playing and a relaunch brings the window back; the command line and mini player drive the same session; a pasted link and `ytfast open <link>` each open the linked page.
 9. **Account:** a like, a library save, a subscription and a playlist created, edited and deleted in ytfast are each confirmed by fetching the account afterwards, and the run leaves the account as it found it.
-10. **Now Playing and pages:** screenshots of the cover wash under a light and a dark theme, timed lyrics advancing with the song, History, Home mood chips and artist See all pages.
+10. **Now Playing and pages:** screenshots of Now Playing under a light and a dark theme, checked to sit on the theme's own background, timed lyrics advancing with the song, History, Home mood chips and artist See all pages.
 11. **Signature moments:** a screen recording of each moment on the OptiPlex, with frame timing showing input answered in the same frame and no added delay to audio or first content.
