@@ -25,55 +25,6 @@ pub(super) struct Look {
     pub peak: Color32,
 }
 
-/// The heat as (x, 0..=1) points along `line`'s width: lightly smoothed,
-/// then a Catmull-Rom curve through the markers' middles.
-fn curve(heat: &Heat, duration: f64, line: Rect) -> Vec<(f32, f32)> {
-    let m = &heat.markers;
-    let x = |t: f64| line.left() + (t / duration).clamp(0.0, 1.0) as f32 * line.width();
-    let smooth = |i: usize| {
-        let at = |j: isize| m[j.clamp(0, m.len() as isize - 1) as usize].intensity;
-        let i = i as isize;
-        (at(i - 1) + 2.0 * at(i) + at(i + 1)) / 4.0
-    };
-    let mut points = Vec::with_capacity(m.len() + 2);
-    points.push((line.left(), smooth(0)));
-    for (i, marker) in m.iter().enumerate() {
-        points.push((x(marker.start + marker.duration / 2.0), smooth(i)));
-    }
-    points.push((x(heat.length()), smooth(m.len() - 1)));
-    let n = points.len();
-    let get = |i: isize| points[i.clamp(0, n as isize - 1) as usize];
-    let mut out = Vec::with_capacity(n * 3);
-    for i in 0..n as isize - 1 {
-        let (p0, p1, p2, p3) = (get(i - 1), get(i), get(i + 1), get(i + 2));
-        for k in 0..3 {
-            let t = k as f32 / 3.0;
-            let cr = |a: f32, b: f32, c: f32, d: f32| {
-                0.5 * (2.0 * b
-                    + (c - a) * t
-                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
-                    + (3.0 * b - a - 3.0 * c + d) * t * t * t)
-            };
-            out.push((
-                cr(p0.0, p1.0, p2.0, p3.0),
-                cr(p0.1, p1.1, p2.1, p3.1).clamp(0.0, 1.0),
-            ));
-        }
-    }
-    out.push(points[n - 1]);
-    out
-}
-
-fn value_at(points: &[(f32, f32)], x: f32) -> f32 {
-    let i = points.partition_point(|p| p.0 < x);
-    match (i.checked_sub(1).and_then(|j| points.get(j)), points.get(i)) {
-        (Some(a), Some(b)) if b.0 > a.0 => a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0),
-        (_, Some(b)) => b.1,
-        (Some(a), None) => a.1,
-        (None, None) => 0.0,
-    }
-}
-
 /// Draws the ridge rising from the top of `line`, `height` tall where the
 /// heat is greatest, `played` (0..=1) of it behind the playhead. `open`
 /// (0..=1) brings out the peak's mark and part. Returns the peak's crest.
@@ -88,13 +39,18 @@ pub(super) fn paint(
     open: f32,
     look: &Look,
 ) -> Option<Pos2> {
-    if duration <= 0.0 || heat.markers.is_empty() {
+    if duration <= 0.0 || heat.curve.is_empty() {
         return None;
     }
-    let points = curve(heat, duration, line);
     let base = line.top();
-    let top = |(x, v): (f32, f32)| pos2(x, base - height * v);
-    let tops: Vec<Pos2> = points.iter().map(|&p| top(p)).collect();
+    let x = |t: f64| line.left() + (t / duration).clamp(0.0, 1.0) as f32 * line.width();
+    // The curve is worked out once per song (`Heat::curve`); here it is
+    // only placed on the line.
+    let tops: Vec<Pos2> = heat
+        .curve
+        .iter()
+        .map(|&(t, v)| pos2(x(t), base - height * v))
+        .collect();
     let playhead = line.left() + line.width() * played.clamp(0.0, 1.0);
     let span = Rect::from_min_max(
         pos2(line.left() - 2.0, base - height - 4.0),
@@ -121,7 +77,6 @@ pub(super) fn paint(
         clipped.add(egui::Shape::mesh(mesh));
     }
     let peak = heat.peak.map(|peak| {
-        let x = |t: f64| line.left() + (t / duration).clamp(0.0, 1.0) as f32 * line.width();
         let at = x(peak.at);
         if open > 0.02 {
             // The most replayed part, underlined along the line.
@@ -131,7 +86,7 @@ pub(super) fn paint(
                 look.peak.gamma_multiply(0.7 * open),
             );
         }
-        top((at, value_at(&points, at)))
+        pos2(at, base - height * heat.value_at(peak.at))
     });
     painter.add(egui::Shape::line(tops, Stroke::new(1.2, look.edge)));
     if let Some(crest) = peak {

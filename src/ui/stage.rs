@@ -474,28 +474,20 @@ fn timed(
     let gap = size * 0.5;
     let width = rect.width().max(120.0);
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    let mut tops = Vec::with_capacity(lyrics.lines.len());
-    let mut galleys = Vec::with_capacity(lyrics.lines.len());
-    let mut y = 0.0_f32;
-    for line in &lyrics.lines {
-        let text = if line.text.is_empty() {
-            "♪"
-        } else {
-            line.text.as_str()
-        };
-        let galley = painter.layout(
-            text.to_owned(),
-            font(Weight::Bold, size),
-            Color32::PLACEHOLDER,
-            width,
-        );
-        tops.push(y);
-        y += galley.size().y + gap;
-        galleys.push(galley);
-    }
+    // Lines measured once per song and size; only the ones shown are laid out.
+    let line_font = font(Weight::Bold, size);
+    let m = super::lyrics::metrics(
+        &painter,
+        lyrics,
+        id,
+        &line_font,
+        width,
+        gap,
+        ("stage", current),
+    );
     let anchor = rect.height() * 0.36;
     let target = match lit {
-        Some(i) => tops[i] + galleys[i].size().y / 2.0 - anchor,
+        Some(i) => m.tops[i] + m.heights[i] / 2.0 - anchor,
         None => -anchor + size,
     };
     let (offset, warm) = if current {
@@ -510,14 +502,16 @@ fn timed(
         (kept.map_or(target, |k| k.0), 1.0)
     };
     let anchor_y = rect.top() + anchor;
-    for (i, galley) in galleys.iter().enumerate() {
-        let line_rect = Rect::from_min_size(
-            pos2(rect.left(), rect.top() + tops[i] - offset),
-            vec2(width, galley.size().y),
-        );
+    for i in m.first_visible(offset)..lyrics.lines.len() {
+        let top = rect.top() + m.tops[i] - offset;
+        if top > rect.bottom() {
+            break;
+        }
+        let line_rect = Rect::from_min_size(pos2(rect.left(), top), vec2(width, m.heights[i]));
         if !line_rect.intersects(rect) {
             continue;
         }
+        let text = super::lyrics::line_text(&lyrics.lines[i]);
         let colour = match lit {
             Some(c) if c == i => p.text.lerp_to_gamma(p.accent, warm),
             Some(c) if i < c => {
@@ -542,17 +536,23 @@ fn timed(
                     p.surface_hover.gamma_multiply(0.5),
                 );
             }
-            if named(response, galley.text())
+            if named(response, text)
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
                 actions.push(Action::Command(Command::Seek(lyrics.lines[i].start)));
             }
         }
-        painter.galley(line_rect.min, galley.clone(), colour);
+        let galley = painter.layout(
+            text.to_owned(),
+            line_font.clone(),
+            Color32::PLACEHOLDER,
+            width,
+        );
+        painter.galley(line_rect.min, galley, colour);
     }
     if let Some(source) = &lyrics.source {
-        let top = rect.top() + y + gap - offset;
+        let top = rect.top() + m.total + gap - offset;
         if top < rect.bottom() {
             painter.text(
                 pos2(rect.left(), top),

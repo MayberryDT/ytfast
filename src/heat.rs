@@ -42,12 +42,30 @@ pub struct Heat {
     /// Earliest first, covering the whole song.
     pub markers: Vec<Marker>,
     pub peak: Option<Peak>,
+    /// The ridge drawn from the markers: (seconds into the song, 0..=1)
+    /// along a smooth curve, earliest first. Worked out once, here, so
+    /// drawing it only maps the points onto the seek line.
+    pub curve: Vec<(f64, f32)>,
 }
 
 impl Heat {
     /// How long the markers say the song is.
     pub fn length(&self) -> f64 {
         self.markers.last().map_or(0.0, |m| m.start + m.duration)
+    }
+
+    /// The ridge's height (0..=1) `at` seconds into the song.
+    pub fn value_at(&self, at: f64) -> f32 {
+        let points = &self.curve;
+        let i = points.partition_point(|p| p.0 < at);
+        match (i.checked_sub(1).and_then(|j| points.get(j)), points.get(i)) {
+            (Some(a), Some(b)) if b.0 > a.0 => {
+                a.1 + (b.1 - a.1) * ((at - a.0) / (b.0 - a.0)) as f32
+            }
+            (_, Some(b)) => b.1,
+            (Some(a), None) => a.1,
+            (None, None) => 0.0,
+        }
     }
 
     fn from_markers(markers: Vec<Marker>) -> Option<Self> {
@@ -57,10 +75,52 @@ impl Heat {
         let mut heat = Self {
             markers,
             peak: None,
+            curve: Vec::new(),
         };
         heat.peak = peak(&heat.markers, heat.length());
+        heat.curve = curve(&heat.markers, heat.length());
         Some(heat)
     }
+}
+
+/// The heat, lightly smoothed, as a Catmull-Rom curve through the markers'
+/// middles from the start of the song to its end.
+fn curve(m: &[Marker], length: f64) -> Vec<(f64, f32)> {
+    let smooth = |i: usize| {
+        let at = |j: isize| m[j.clamp(0, m.len() as isize - 1) as usize].intensity;
+        let i = i as isize;
+        (at(i - 1) + 2.0 * at(i) + at(i + 1)) / 4.0
+    };
+    let mut points = Vec::with_capacity(m.len() + 2);
+    points.push((0.0, smooth(0)));
+    for (i, marker) in m.iter().enumerate() {
+        points.push((marker.start + marker.duration / 2.0, smooth(i)));
+    }
+    points.push((length, smooth(m.len() - 1)));
+    let n = points.len();
+    let get = |i: isize| points[i.clamp(0, n as isize - 1) as usize];
+    let mut out = Vec::with_capacity(n * 3);
+    for i in 0..n as isize - 1 {
+        let (p0, p1, p2, p3) = (get(i - 1), get(i), get(i + 1), get(i + 2));
+        for k in 0..3 {
+            let t = k as f64 / 3.0;
+            let cr = |a: f64, b: f64, c: f64, d: f64| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
+                    + (3.0 * b - a - 3.0 * c + d) * t * t * t)
+            };
+            let value = cr(
+                f64::from(p0.1),
+                f64::from(p1.1),
+                f64::from(p2.1),
+                f64::from(p3.1),
+            );
+            out.push((cr(p0.0, p1.0, p2.0, p3.0), value.clamp(0.0, 1.0) as f32));
+        }
+    }
+    out.push(points[n - 1]);
+    out
 }
 
 /// The hottest marker after the first 5 %, widened to the run of markers
