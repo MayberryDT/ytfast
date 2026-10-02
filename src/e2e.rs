@@ -105,8 +105,11 @@ fn page_tracks(app: &App) -> Vec<String> {
         .unwrap_or_default()
 }
 
+mod demo;
+
 fn scenario(name: &str) -> Vec<Step> {
     match name {
+        n if n.starts_with("demo-") => demo::scenario(n),
         "recovery" => recovery(),
         "offline" => no_connection(),
         "theme" => theme(),
@@ -974,6 +977,10 @@ enum Step {
     },
     /// Moves the pointer off the window.
     Leave,
+    /// Marks a moment on the wall clock for `scripts/demo.sh`: "roll" starts
+    /// a stretch of video kept and shows the pointer, keys and clicks; "cut"
+    /// ends it.
+    Cue(&'static str),
 }
 
 fn wait(what: &'static str, timeout: f64, check: impl Fn(&App) -> bool + 'static) -> Step {
@@ -4518,6 +4525,13 @@ fn control() -> Vec<Step> {
 
 enum Phase {
     Idle,
+    /// The pointer on its way to a control (only while presenting).
+    Glide {
+        from: Pos2,
+        to: Pos2,
+        started: Instant,
+        seconds: f32,
+    },
     Move(Pos2),
     Press(Pos2),
     Release,
@@ -4558,6 +4572,16 @@ pub struct Driver {
     polled: Option<Instant>,
     /// The controls named the frame before `frame`'s registry.
     previous: Vec<(String, Rect)>,
+    /// Between a "roll" cue and a "cut": the pointer glides and is drawn,
+    /// with clicks and keys, as a person's would look on video.
+    presenting: bool,
+    /// Where the synthetic pointer is, and when it got there.
+    pointer: Option<Pos2>,
+    arrived: Instant,
+    /// The last press, for its ripple.
+    pressed: Option<(Pos2, Instant)>,
+    /// The last keys pressed (or held, until let go), shown as a keycap.
+    keys: Option<(String, Instant, bool)>,
 }
 
 impl Driver {
@@ -4581,6 +4605,11 @@ impl Driver {
             drag: None,
             polled: None,
             previous: Vec::new(),
+            presenting: false,
+            pointer: None,
+            arrived: Instant::now(),
+            pressed: None,
+            keys: None,
         })
     }
 
@@ -4644,6 +4673,134 @@ impl Driver {
         let steps = std::mem::take(&mut self.steps);
         self.step(&steps[self.index], app, ctx, &stable);
         self.steps = steps;
+        if self.presenting {
+            self.present(app, ctx);
+        }
+    }
+
+    fn move_to(&mut self, pos: Pos2) {
+        self.pending.push(Event::PointerMoved(pos));
+        self.pointer = Some(pos);
+    }
+
+    fn leave(&mut self) {
+        self.pending.push(Event::PointerGone);
+        self.pointer = None;
+    }
+
+    /// Points at `to`: at once, or while presenting by gliding there as a
+    /// hand would (the hover states on the way show). Ends in `Phase::Move`.
+    fn point_at(&mut self, to: Pos2) {
+        if !self.presenting {
+            self.move_to(to);
+            self.phase = Phase::Move(to);
+            return;
+        }
+        let from = self.pointer.unwrap_or(to + egui::vec2(160.0, 180.0));
+        let distance = (to - from).length();
+        self.phase = Phase::Glide {
+            from,
+            to,
+            started: Instant::now(),
+            seconds: (0.3 + distance / 2400.0).min(0.75),
+        };
+    }
+
+    /// Shows the keys pressed, while presenting.
+    fn show_keys(&mut self, modifiers: egui::Modifiers, key: Option<egui::Key>) {
+        if !self.presenting {
+            return;
+        }
+        let mut parts = Vec::new();
+        if modifiers.ctrl || modifiers.command {
+            parts.push("Ctrl");
+        }
+        if modifiers.alt {
+            parts.push("Alt");
+        }
+        // `?` and `+` are typed with Shift; the keycap shows the character.
+        if modifiers.shift && !matches!(key, Some(egui::Key::Questionmark | egui::Key::Plus)) {
+            parts.push("Shift");
+        }
+        let name = key.map(|k| match k {
+            egui::Key::Escape => "Esc",
+            egui::Key::Enter => "Enter",
+            egui::Key::Space => "Space",
+            k => k.symbol_or_name(),
+        });
+        parts.extend(name);
+        self.keys = Some((parts.join(" + "), Instant::now(), key.is_none()));
+    }
+
+    /// The pointer, the last click's ripple and the last keys, drawn over
+    /// everything in the theme's colours.
+    fn present(&self, app: &App, ctx: &egui::Context) {
+        use egui::{CornerRadius, FontId, Shape, Stroke, StrokeKind, pos2, vec2};
+        let p = &app.palette;
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Debug,
+            Id::new("ytfast-e2e-presenter"),
+        ));
+        if let Some((at, when)) = self.pressed {
+            let t = when.elapsed().as_secs_f32() / 0.45;
+            if t < 1.0 {
+                let radius = 8.0 + 22.0 * (1.0 - (1.0 - t).powi(3));
+                painter.circle_filled(at, radius, p.accent.gamma_multiply(0.3 * (1.0 - t)));
+                painter.circle_stroke(
+                    at,
+                    radius,
+                    Stroke::new(2.0, p.accent.gamma_multiply(1.0 - t)),
+                );
+            }
+        }
+        if let Some((label, when, held)) = &self.keys {
+            let age = if *held {
+                0.0
+            } else {
+                when.elapsed().as_secs_f32()
+            };
+            let alpha = (1.0 - (age - 1.2) / 0.4).clamp(0.0, 1.0);
+            if alpha > 0.0 {
+                let galley = painter.layout_no_wrap(
+                    label.clone(),
+                    FontId::proportional(28.0),
+                    p.text.gamma_multiply(alpha),
+                );
+                let screen = ctx.content_rect();
+                let rect = egui::Rect::from_center_size(
+                    pos2(screen.center().x, screen.bottom() - 170.0),
+                    galley.size() + vec2(44.0, 24.0),
+                );
+                painter.rect(
+                    rect,
+                    CornerRadius::same(14),
+                    p.panel.gamma_multiply(alpha),
+                    Stroke::new(2.0, p.accent.gamma_multiply(alpha)),
+                    StrokeKind::Inside,
+                );
+                painter.galley(rect.center() - galley.size() / 2.0, galley, p.text);
+            }
+        }
+        if let Some(at) = self.pointer {
+            let scale = 1.35;
+            let arrow = |offset: egui::Vec2| {
+                vec![
+                    at + offset,
+                    at + offset + vec2(1.5, 20.0) * scale,
+                    at + offset + vec2(14.5, 13.5) * scale,
+                ]
+            };
+            painter.add(Shape::convex_polygon(
+                arrow(vec2(1.5, 2.5)),
+                p.shadow,
+                Stroke::NONE,
+            ));
+            painter.add(Shape::convex_polygon(
+                arrow(egui::Vec2::ZERO),
+                p.text,
+                Stroke::new(1.5, p.window),
+            ));
+        }
     }
 
     fn step(
@@ -4654,6 +4811,26 @@ impl Driver {
         registry: &[(String, Rect)],
     ) {
         let elapsed = self.step_started.elapsed().as_secs_f64();
+        if let Phase::Glide {
+            from,
+            to,
+            started,
+            seconds,
+        } = self.phase
+        {
+            let t = (started.elapsed().as_secs_f32() / seconds).min(1.0);
+            let eased = if t < 0.5 {
+                4.0 * t * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+            };
+            self.move_to(from.lerp(to, eased));
+            if t >= 1.0 {
+                self.phase = Phase::Move(to);
+                self.arrived = Instant::now();
+            }
+            return;
+        }
         match step {
             Step::Wait {
                 what,
@@ -4690,8 +4867,7 @@ impl Driver {
                     match found {
                         Some((name, rect)) => {
                             self.note(&format!("click {describe} = {name:?}"));
-                            self.pending.push(Event::PointerMoved(rect.center()));
-                            self.phase = Phase::Move(rect.center());
+                            self.point_at(rect.center());
                         }
                         None if elapsed > *timeout => {
                             let shown: Vec<&String> = wanted.iter().take(3).collect();
@@ -4702,6 +4878,9 @@ impl Driver {
                         None => {}
                     }
                 }
+                // While presenting, the pointer rests a moment before it presses.
+                Phase::Move(_) if self.presenting && self.arrived.elapsed().as_secs_f32() < 0.2 => {
+                }
                 Phase::Move(pos) => {
                     self.pending.push(Event::PointerButton {
                         pos,
@@ -4709,6 +4888,7 @@ impl Driver {
                         pressed: true,
                         modifiers: Default::default(),
                     });
+                    self.pressed = Some((pos, Instant::now()));
                     self.phase = Phase::Press(pos);
                 }
                 Phase::Press(pos) => {
@@ -4721,9 +4901,13 @@ impl Driver {
                     self.phase = Phase::Release;
                 }
                 Phase::Release => {
-                    self.pending.push(Event::PointerGone);
+                    // A person's pointer stays where it clicked.
+                    if !self.presenting {
+                        self.leave();
+                    }
                     self.advance();
                 }
+                Phase::Glide { .. } => {}
             },
             Step::Type(text) => {
                 self.pending.push(Event::Text(text.clone()));
@@ -4764,11 +4948,17 @@ impl Driver {
                     });
                 }
                 self.note(&format!("key {key:?}"));
+                self.show_keys(Default::default(), Some(key));
                 self.advance();
             }
             Step::Hold(modifiers) => {
                 self.pending.push(Event::ModifiersChanged(*modifiers));
                 self.note(&format!("hold {modifiers:?}"));
+                if modifiers.any() {
+                    self.show_keys(*modifiers, None);
+                } else if let Some((_, when, held)) = &mut self.keys {
+                    (*when, *held) = (Instant::now(), false);
+                }
                 self.advance();
             }
             Step::KeyWith(modifiers, key) => {
@@ -4783,6 +4973,7 @@ impl Driver {
                     });
                 }
                 self.note(&format!("key {modifiers:?} {key:?}"));
+                self.show_keys(modifiers, Some(key));
                 self.advance();
             }
             Step::Screenshot(name) => {
@@ -4836,12 +5027,19 @@ impl Driver {
                 self.advance();
             }
             Step::Hover { label, describe } => {
+                // Arrived (after a glide while presenting).
+                if let Phase::Move(_) = self.phase {
+                    self.advance();
+                    return;
+                }
                 let wanted = label(app);
                 match find_control(registry, ctx, wanted.as_deref()) {
                     Some(rect) => {
                         self.note(&format!("hover {describe} = {wanted:?}"));
-                        self.pending.push(Event::PointerMoved(rect.center()));
-                        self.advance();
+                        self.point_at(rect.center());
+                        if !self.presenting {
+                            self.advance();
+                        }
                     }
                     None if elapsed > 15.0 => {
                         self.fail(format!("no visible control named {describe} ({wanted:?})"));
@@ -4850,8 +5048,27 @@ impl Driver {
                 }
             }
             Step::Leave => {
-                self.pending.push(Event::PointerGone);
+                self.leave();
                 self.note("pointer leaves");
+                self.advance();
+            }
+            Step::Cue(name) => {
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                match *name {
+                    "roll" => self.presenting = true,
+                    "cut" => self.presenting = false,
+                    _ => {}
+                }
+                if let Value::Array(cues) = self
+                    .measurements
+                    .entry("cues".into())
+                    .or_insert_with(|| json!([]))
+                {
+                    cues.push(json!({"cue": name, "unix_ms": ms}));
+                }
+                self.note(&format!("cue {name}"));
                 self.advance();
             }
             Step::Drag { from, to, describe } => match self.drag {
@@ -4864,8 +5081,13 @@ impl Driver {
                     ));
                     match found {
                         Some((start, end)) => {
+                            // While presenting, the pointer first glides to the start.
+                            if self.presenting && !matches!(self.phase, Phase::Move(_)) {
+                                self.point_at(start.center());
+                                return;
+                            }
                             self.note(&format!("drag {describe}: {a:?} onto {b:?}"));
-                            self.pending.push(Event::PointerMoved(start.center()));
+                            self.move_to(start.center());
                             self.drag = Some((start.center(), end.center(), 0));
                         }
                         None if elapsed > 20.0 => {
@@ -4876,9 +5098,10 @@ impl Driver {
                         None => {}
                     }
                 }
-                // Press, move in ten frames, rest on the target, release.
+                // Press, move in ten frames (a slower, eased move while
+                // presenting), rest on the target, release.
                 Some((start, end, frame)) => {
-                    const MOVES: u32 = 10;
+                    let moves: u32 = if self.presenting { 40 } else { 10 };
                     let button = |pos, pressed| Event::PointerButton {
                         pos,
                         button: egui::PointerButton::Primary,
@@ -4886,15 +5109,25 @@ impl Driver {
                         modifiers: Default::default(),
                     };
                     match frame {
-                        0 => self.pending.push(button(start, true)),
-                        f if f <= MOVES => {
-                            let t = f as f32 / MOVES as f32;
-                            self.pending.push(Event::PointerMoved(start.lerp(end, t)));
+                        0 => {
+                            self.pending.push(button(start, true));
+                            self.pressed = Some((start, Instant::now()));
                         }
-                        f if f == MOVES + 1 => self.pending.push(Event::PointerMoved(end)),
-                        f if f == MOVES + 2 => self.pending.push(button(end, false)),
+                        f if f <= moves => {
+                            let t = f as f32 / moves as f32;
+                            let t = if self.presenting {
+                                t * t * (3.0 - 2.0 * t)
+                            } else {
+                                t
+                            };
+                            self.move_to(start.lerp(end, t));
+                        }
+                        f if f == moves + 1 => self.move_to(end),
+                        f if f == moves + 2 => self.pending.push(button(end, false)),
                         _ => {
-                            self.pending.push(Event::PointerGone);
+                            if !self.presenting {
+                                self.leave();
+                            }
                             self.advance();
                             return;
                         }

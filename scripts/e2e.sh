@@ -96,11 +96,11 @@ showcase)
 	# No browser profiles at all: ytfast stays signed out. The desktop's
 	# Omarchy theme is linked in so the colours are the real ones.
 	fake="$dir/home"
-	mkdir -p "$fake/.config" "$fake/.cache" "$fake/.local/state"
+	mkdir -p "$fake/.config" "$fake/.cache" "$fake/.local/state" "$fake/.local/share"
 	ln -s "$HOME/.config/omarchy" "$fake/.config/omarchy"
 	ln -s "$HOME/.local/state/omarchy" "$fake/.local/state/omarchy"
 	set -- "$@" -E HOME="$fake" -E XDG_CONFIG_HOME="$fake/.config" -E XDG_CACHE_HOME="$fake/.cache" \
-		-E XDG_STATE_HOME="$fake/.local/state" -E YTFAST_E2E_REAL_HOME="$HOME"
+		-E XDG_STATE_HOME="$fake/.local/state" -E XDG_DATA_HOME="$fake/.local/share" -E YTFAST_E2E_REAL_HOME="$HOME"
 	log="$fake/.cache/ytfast/ytfast.log"
 	;;
 esac

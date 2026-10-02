@@ -11,7 +11,7 @@ ytfast is a native YouTube Music client for Omarchy (Linux): Rust + egui on [fas
 ## Rules
 
 - Cookie values and the Chromium cookie key are secrets. Never log, print or commit them; derived cookie files are 0600 and short-lived. Read the browser's cookie store read-only and never restart or modify the browser.
-- Nothing from a real account goes into the repository: no captured responses, screenshots or logs with account data. E2E artifacts stay in the gitignored `artifacts/`. Public screenshots come from the signed-out `showcase` scenario.
+- Nothing from a real account goes into the repository: no captured responses, screenshots or logs with account data. E2E artifacts stay in the gitignored `artifacts/`. Public screenshots come from the signed-out `showcase` scenario, public videos from `scripts/demo.sh` (also signed out).
 - Colours come only from the Omarchy theme palette. Never hard-code colours.
 - Don't vendor or patch upstream crates here. Keep the egui/winit fork pins and the fastframe tag aligned with ZapFast/Spotifast and move them together.
 - Tests: prefer E2E through the real app (`scripts/e2e.sh`), producing a repeatable artifact under `artifacts/`. No unit tests written after the code, and no tautological tests.

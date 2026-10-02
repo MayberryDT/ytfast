@@ -77,3 +77,10 @@ A release build from clean takes about 5 minutes on a 4-core desktop CPU and a f
 - `showcase` runs with an empty stand-in `HOME` (the real Omarchy theme linked in), so it is signed out and its screenshots hold no account data. The README's pictures come from it.
 - `engine` then `engine-restore`, in that order: `engine` ends with a session and writes what the next launch must show to `~/.cache/ytfast/e2e-engine-expected.json`; `engine-restore` checks it and puts back the volume, equalizer and levelling. In e2e builds the backend records what mpv reports (`volume-gain` per track, `af`, the sleep fade) for these scenarios.
 - Never run two scenarios at once: each stops any running ytfast.
+
+## Demo videos
+
+`scripts/demo.sh [flight|stage|themes|audition|mix|keys|sound …]` records short videos of the app for showing people, all of them by default. It builds a release with the `e2e` feature and runs the `demo-*` scenarios (`src/e2e/demo.rs`) signed out, in one empty stand-in `HOME` shared by the clips (pages and streams carry over; settings and the session don't). Each clip records the whole screen and the default sink's monitor with `wf-recorder`, then keeps the stretches its scenario cues: a `Step::Cue("roll")` starts one and shows the driver's pointer gliding between controls, a ripple on each press and the keys pressed, all drawn in the theme's colours over the app; `Step::Cue("cut")` ends it. Waits that would show a still screen (a theme switch while `omarchy-theme-set` works) sit between a cut and the next roll. The clips run full screen. It writes `artifacts/demo/<UTC>/<clip>.mp4` (H.264 at 60 fps, AAC) and `<clip>-silent.mp4`.
+
+- The OptiPlex's ibara display runs at 30 Hz; set it to 60 for recording (`hyprctl eval 'hl.monitor({ output = "IbaraVirtual", mode = "1920x1080@60", position = "0x0", scale = 1 })'`) and back to 30 afterwards.
+- `themes` switches the desktop's theme through the installed ones and back.
