@@ -204,10 +204,28 @@ pub(super) fn cover(
     match url {
         Some(url) => {
             // In theme colours when that's on (outside Now Playing and Stage).
-            egui::Image::new(crate::derived::cover_source(ui.ctx(), url, rect.size()))
+            let image = egui::Image::new(crate::derived::cover_source(ui.ctx(), url, rect.size()))
                 .corner_radius(corner)
-                .show_loading_spinner(false)
-                .paint_at(ui, rect);
+                .show_loading_spinner(false);
+            // Loaded with its own aspect ratio preserved (rather than the
+            // target size, which would stretch it) so it can be cropped to
+            // `rect` below: YouTube serves plenty of thumbnails, e.g.
+            // unofficial live uploads, at 16:9 rather than square.
+            match image.source(ui.ctx()).load(
+                ui.ctx(),
+                egui::TextureOptions::default(),
+                egui::SizeHint::Width(512),
+            ) {
+                Ok(egui::load::TexturePoll::Ready { texture }) => {
+                    let options = egui::ImageOptions {
+                        uv: cover_uv(texture.size, rect.size()),
+                        corner_radius: corner,
+                        ..Default::default()
+                    };
+                    egui::paint_texture_at(ui.painter(), rect, &options, &texture);
+                }
+                _ => image.paint_at(ui, rect),
+            }
         }
         None => {
             let s = (rect.width() * 0.35).clamp(14.0, 64.0);
@@ -215,6 +233,25 @@ pub(super) fn cover(
                 .image(p.dim, s)
                 .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(s)));
         }
+    }
+}
+
+/// UV rect that crops the source image to `target`'s aspect ratio, centred
+/// (the same effect as CSS `object-fit: cover`), instead of stretching it.
+fn cover_uv(image_size: Vec2, target: Vec2) -> Rect {
+    if image_size.x <= 0.0 || image_size.y <= 0.0 || target.x <= 0.0 || target.y <= 0.0 {
+        return Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    }
+    let image_aspect = image_size.x / image_size.y;
+    let target_aspect = target.x / target.y;
+    if image_aspect > target_aspect {
+        let visible = target_aspect / image_aspect;
+        let margin = (1.0 - visible) / 2.0;
+        Rect::from_min_max(pos2(margin, 0.0), pos2(1.0 - margin, 1.0))
+    } else {
+        let visible = image_aspect / target_aspect;
+        let margin = (1.0 - visible) / 2.0;
+        Rect::from_min_max(pos2(0.0, margin), pos2(1.0, 1.0 - margin))
     }
 }
 
