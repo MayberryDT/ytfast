@@ -23,9 +23,21 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def run(*args, env=None):
+def run(*args, env=None, log=None):
     p = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True)
-    require(p.returncode == 0, f"{' '.join(map(str, args))}: {p.stderr.strip()}")
+    if log:
+        log.write_text(p.stdout)
+        log.with_suffix(".stderr.txt").write_text(p.stderr)
+    diagnostics = []
+    if p.returncode != 0:
+        for line in p.stdout.splitlines():
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if message.get("reason") == "compiler-message" and message["message"]["level"] == "error":
+                diagnostics.append(message["message"].get("rendered") or message["message"]["message"])
+    require(p.returncode == 0, f"{' '.join(map(str, args))}: {p.stderr.strip()}\n" + "\n".join(diagnostics))
     return p.stdout.strip()
 
 
@@ -143,10 +155,11 @@ def main():
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(build)
     print("Checking formatting and strict Clippy, then building the normal release executable…", flush=True)
-    run("cargo", "fmt", "--all", "--check", env=env)
-    run("cargo", "clippy", "--locked", "--all-targets", "--features", "e2e", "-j", "1", "--", "-D", "warnings", env=env)
-    messages = run("cargo", "build", "--locked", "--release", "--bin", "ytfast", "-j", "1", "--message-format=json", env=env)
-    (out / "cargo-build.jsonl").write_text(messages + "\n")
+    run("cargo", "fmt", "--all", "--check", env=env, log=out / "format.txt")
+    run("cargo", "clippy", "--locked", "--all-targets", "--features", "e2e", "-j", "1", "--", "-D", "warnings",
+        env=env, log=out / "clippy.txt")
+    messages = run("cargo", "build", "--locked", "--release", "--bin", "ytfast", "-j", "1", "--message-format=json",
+                   env=env, log=out / "cargo-build.jsonl")
     artifacts = [json.loads(line) for line in messages.splitlines() if line.startswith("{")]
     binary = [a for a in artifacts if a.get("reason") == "compiler-artifact"
               and a.get("target", {}).get("name") == "ytfast" and a.get("executable")]
