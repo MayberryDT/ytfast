@@ -65,6 +65,12 @@ A release build from clean takes about 5 minutes on a 4-core desktop CPU and a f
 
 ## E2E runs
 
+Release packaging and publication use [releases.md](releases.md) and
+`scripts/release.py`, with Cargo.toml as the authoritative version. The release
+command checks formatting/Clippy, builds with `--locked --release` without e2e,
+then packages and verifies the actual executable. Dry-run performs no GitHub
+writes or installation; CLI/linkage smoke does not replace native acceptance.
+
 `scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore]` builds with the `e2e` feature and runs the real app on the desktop with the real account, network, yt-dlp and mpv. `src/e2e.rs` clicks controls by their accessible names (`ui::named`) with synthetic pointer events through egui's own input pipeline, types, presses keys, drags, takes framebuffer screenshots and records measurements. It writes `artifacts/e2e/<UTC>-<scenario>/` (gitignored: account data).
 
 - The driver points only at controls drawn in the same place in two consecutive frames. egui lays out a new popup or modal once before showing it (a sizing pass), at a different place: on 2026-10-01 the sleep timer's "End of song" sat ~200 px higher in that first frame and the equalizer's preset chips 14–26 px off, so clicks aimed there landed on Up next or between chips.

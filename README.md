@@ -105,6 +105,11 @@ install -Dm644 assets/ytfast.desktop ~/.local/share/applications/ytfast.desktop
 
 The release build takes several minutes and a few GB of memory. Logs go to `~/.cache/ytfast/ytfast.log`.
 
+Published Linux archives are available in [GitHub Releases](https://github.com/MayberryDT/ytfast/releases).
+`v0.1.0` is the first release. See the [changelog](CHANGELOG.md) and
+[release procedure](docs/releases.md) for version policy and the repeatable
+`python3 scripts/release.py --dry-run` / `--publish` commands.
+
 ## Development
 
 [docs/SPEC.md](docs/SPEC.md) describes the product: what each screen does and what's deliberately left out. [docs/integration.md](docs/integration.md) has the verified facts it relies on (cookie decryption, YouTube's API, stream formats) and the design. [AGENTS.md](AGENTS.md) holds the rules for coding agents, and for people too.
