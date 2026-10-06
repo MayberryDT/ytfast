@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::motion;
 use super::ridge;
-use super::widgets::{font, icon_button, named, named_as, runs_text, track_line};
+use super::widgets::{font, icon_button, named, named_as, paint_cover, runs_text, track_line};
 use crate::app::{Action, App};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -109,17 +109,11 @@ fn big_cover(ui: &Ui, rect: Rect, url: Option<&str>, radius: u8, p: &Palette) {
             .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(s)));
         return;
     };
-    egui::Image::new(url)
-        .corner_radius(corner)
-        .show_loading_spinner(false)
-        .paint_at(ui, rect);
+    paint_cover(ui, rect, egui::Image::new(url).corner_radius(corner));
     if let Some(big) = sharp(url)
         && texture(ui.ctx(), &big, rect.size()).is_some()
     {
-        egui::Image::new(big)
-            .corner_radius(corner)
-            .show_loading_spinner(false)
-            .paint_at(ui, rect);
+        paint_cover(ui, rect, egui::Image::new(big).corner_radius(corner));
     }
 }
 

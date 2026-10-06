@@ -299,18 +299,22 @@ pub fn land(ui: &Ui, site: Id, url: Option<&str>, dest: Rect, radius: f32) -> bo
     // The cover that left is already decoded; when this place shows another
     // image (or another size of it), that one fades in as the cover lands.
     // Drawn as this place draws its covers (theme-painted or not).
-    egui::Image::new(crate::derived::cover_source(ctx, &flight.url, rect.size()))
-        .corner_radius(corner)
-        .show_loading_spinner(false)
-        .paint_at(&over, rect);
+    super::widgets::paint_cover(
+        &over,
+        rect,
+        egui::Image::new(crate::derived::cover_source(ctx, &flight.url, rect.size()))
+            .corner_radius(corner),
+    );
     if dest_ready && !same_cover(&flight.url, url) {
         let fade = ((t / FLIGHT as f32 - 0.5) / 0.45).clamp(0.0, 1.0);
         if fade > 0.0 {
-            egui::Image::new(shown)
-                .corner_radius(corner)
-                .tint(egui::Color32::WHITE.gamma_multiply(fade))
-                .show_loading_spinner(false)
-                .paint_at(&over, rect);
+            super::widgets::paint_cover(
+                &over,
+                rect,
+                egui::Image::new(shown)
+                    .corner_radius(corner)
+                    .tint(egui::Color32::WHITE.gamma_multiply(fade)),
+            );
         }
     }
     ctx.request_repaint();

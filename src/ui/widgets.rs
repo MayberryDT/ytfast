@@ -2,6 +2,7 @@ use crate::app::Action;
 use crate::icons::Icon;
 use crate::model::{Run, Track};
 use crate::theme::Palette;
+use egui::emath::GuiRounding as _;
 use egui::{Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use fastframe_fonts::Weight;
 
@@ -204,34 +205,45 @@ pub(super) fn cover(
     match url {
         Some(url) => {
             // In theme colours when that's on (outside Now Playing and Stage).
-            let image = egui::Image::new(crate::derived::cover_source(ui.ctx(), url, rect.size()))
-                .corner_radius(corner)
-                .show_loading_spinner(false);
-            // Loaded with its own aspect ratio preserved (rather than the
-            // target size, which would stretch it) so it can be cropped to
-            // `rect` below: YouTube serves plenty of thumbnails, e.g.
-            // unofficial live uploads, at 16:9 rather than square.
-            match image.source(ui.ctx()).load(
-                ui.ctx(),
-                egui::TextureOptions::default(),
-                egui::SizeHint::Width(512),
-            ) {
-                Ok(egui::load::TexturePoll::Ready { texture }) => {
-                    let options = egui::ImageOptions {
-                        uv: cover_uv(texture.size, rect.size()),
-                        corner_radius: corner,
-                        ..Default::default()
-                    };
-                    egui::paint_texture_at(ui.painter(), rect, &options, &texture);
-                }
-                _ => image.paint_at(ui, rect),
-            }
+            paint_cover(
+                ui,
+                rect,
+                egui::Image::new(crate::derived::cover_source(ui.ctx(), url, rect.size()))
+                    .corner_radius(corner),
+            );
         }
         None => {
             let s = (rect.width() * 0.35).clamp(14.0, 64.0);
             Icon::Music
                 .image(p.dim, s)
                 .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(s)));
+        }
+    }
+}
+
+/// Draw artwork with the same centred crop in cards, flights and Stage.
+/// Keep the image's corners, tint and texture options. Pending/error states
+/// use this same load result, so becoming ready cannot bypass the crop.
+pub(super) fn paint_cover(ui: &Ui, rect: Rect, image: egui::Image<'_>) {
+    let rect = rect.round_to_pixels(ui.pixels_per_point());
+    match image.load_for_size(ui.ctx(), rect.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            // Raster loaders retain the source aspect ratio; the UVs determine
+            // which part of that source fills the destination rectangle.
+            let mut options = image.image_options().clone();
+            options.uv = cover_uv(texture.size, rect.size());
+            egui::paint_texture_at(ui.painter(), rect, &options, &texture);
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {}
+        Err(_) => {
+            // Match Image::paint_at's error marker, without polling again.
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "⚠",
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().error_fg_color,
+            );
         }
     }
 }
