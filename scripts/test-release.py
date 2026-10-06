@@ -14,7 +14,9 @@ def run(*args, cwd=ROOT):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="ytfast-release-tests-", dir=pathlib.Path.home() / "build") as tmp:
+    build = pathlib.Path.home() / "build"
+    build.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ytfast-release-tests-", dir=build) as tmp:
         tree = pathlib.Path(tmp) / "source"
         run("git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(tree))
         try:
@@ -23,8 +25,17 @@ def main():
                 run("git", "-c", "user.name=Release smoke", "-c", "user.email=smoke@example.invalid",
                     "commit", "-qm", "Isolated release preflight fixture", cwd=tree)
 
-            def check(expected):
-                p = subprocess.run(["python3", "scripts/release.py", "--check"], cwd=tree,
+            def check(expected, external=False):
+                command = ["python3", "scripts/release.py", "--check"]
+                if external:
+                    # Run the real preflight on a baseline checkout with only a
+                    # version/changelog edit; adding the tooling would be a real change.
+                    command = ["python3", "-c",
+                               "import importlib.util,pathlib; s=importlib.util.spec_from_file_location('release',"
+                               + repr(str(ROOT / "scripts/release.py"))
+                               + ");m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+                               "m.ROOT=pathlib.Path.cwd();m.main()", "--check"]
+                p = subprocess.run(command, cwd=tree,
                                    text=True, capture_output=True)
                 if expected == "pass":
                     assert p.returncode == 0, p.stderr
@@ -70,6 +81,15 @@ def main():
                 check("local tag")
             finally:
                 run("git", "tag", "-d", "v0.1.1", cwd=tree)
+
+            base = run("git", "ls-remote", "https://github.com/MayberryDT/ytfast.git", "refs/tags/v0.1.0").split()[0]
+            run("git", "reset", "--hard", base, cwd=tree)
+            manifest.write_text(manifest.read_text().replace('version = "0.1.0"', 'version = "0.1.1"', 1))
+            lock.write_text(lock.read_text().replace('name = "ytfast"\nversion = "0.1.0"',
+                                                   'name = "ytfast"\nversion = "0.1.1"', 1))
+            log.write_text("# Changelog\n\n## 0.1.1\n\nChange type: fix\n\n- Only a version edit.\n")
+            commit()
+            check("version/changelog-only", external=True)
         finally:
             shutil.rmtree(tree)
 

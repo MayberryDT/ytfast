@@ -63,7 +63,7 @@ def preflight(publish):
     head = run("git", "rev-parse", "HEAD")
 
     # Read GitHub explicitly, never infer the publication target from origin.
-    releases = run("gh", "api", f"repos/{repo}/releases?per_page=100", "--paginate", "--jq",
+    releases = run("gh", "api", "--hostname", "github.com", f"repos/{repo}/releases?per_page=100", "--paginate", "--jq",
                    '.[] | select(.draft == false and .prerelease == false) | .tag_name').splitlines()
     require(tag not in releases, f"release {tag} already exists; never rewrite a published version")
     require(not remote_commit(url, "refs/tags/" + tag), f"remote tag {tag} already exists; inspect it, do not overwrite")
@@ -108,7 +108,7 @@ def preflight(publish):
     require(changed or old_manifest != new_manifest or old_lock != lock,
             "version/changelog-only bump has no real changes")
     if publish:
-        default_branch = run("gh", "api", f"repos/{repo}", "--jq", ".default_branch")
+        default_branch = run("gh", "api", "--hostname", "github.com", f"repos/{repo}", "--jq", ".default_branch")
         require(remote_commit(url, "refs/heads/" + default_branch) == head,
                 "publish requires HEAD to be the canonical remote default-branch commit")
     return {"version": version, "tag": tag, "repository": repo, "source_commit": head,
@@ -193,7 +193,7 @@ def main():
     sums = out / "SHA256SUMS"
     sums.write_text("".join(f"{digest(p)}  {p.relative_to(out)}\n" for p in [archive, provenance, package / "ytfast"]))
     command = ["gh", "release", "create", info["tag"], str(archive), str(sums), str(provenance),
-               "--repo", info["repository"], "--target", info["source_commit"],
+               "--repo", "github.com/" + info["repository"], "--target", info["source_commit"],
                "--title", f"Music / YTfast {info['version']}", "--notes-file", str(notes)]
     receipt = {"mode": "publish" if args.publish else "dry-run", "publication_command": command,
                "published": False, "source_commit": info["source_commit"], "version": info["version"],
@@ -205,10 +205,10 @@ def main():
         receipt["release_url"] = run(*command)
         require(remote_commit(f"https://github.com/{info['repository']}.git", "refs/tags/" + info["tag"]) == info["source_commit"],
                 "published tag points to another commit; inspect without overwriting")
-        release = json.loads(run("gh", "release", "view", info["tag"], "--repo", info["repository"], "--json", "isDraft,isPrerelease,url"))
+        release = json.loads(run("gh", "release", "view", info["tag"], "--repo", "github.com/" + info["repository"], "--json", "isDraft,isPrerelease,url"))
         require(not release["isDraft"] and not release["isPrerelease"], "release is not published as a normal release")
         with tempfile.TemporaryDirectory(prefix="ytfast-published-") as tmp:
-            run("gh", "release", "download", info["tag"], "--repo", info["repository"], "--dir", tmp)
+            run("gh", "release", "download", info["tag"], "--repo", "github.com/" + info["repository"], "--dir", tmp)
             for asset in [archive, sums, provenance]:
                 require(digest(Path(tmp) / asset.name) == digest(asset), f"published {asset.name} checksum differs")
         receipt["published"] = True
