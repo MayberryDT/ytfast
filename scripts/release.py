@@ -35,7 +35,7 @@ def run(*args, env=None, log=None):
                 message = json.loads(line)
             except ValueError:
                 continue
-            if message.get("reason") == "compiler-message" and message["message"]["level"] == "error":
+            if isinstance(message, dict) and message.get("reason") == "compiler-message" and message["message"]["level"] == "error":
                 diagnostics.append(message["message"].get("rendered") or message["message"]["message"])
     require(p.returncode == 0, f"{' '.join(map(str, args))}: {p.stderr.strip()}\n" + "\n".join(diagnostics))
     return p.stdout.strip()
