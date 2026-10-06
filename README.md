@@ -92,7 +92,7 @@ Cookies are never logged or written anywhere readable by other users. While it r
 
 You need:
 
-- to build: Rust 1.98 or newer, CMake and a C compiler
+- to build: Rust 1.98 or newer, CMake, a C compiler and SQLite development files (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch)
 - to run: `mpv`, `yt-dlp`, `deno` (yt-dlp uses it for YouTube's player challenges) and `secret-tool` (libsecret)
 
 ```sh

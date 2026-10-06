@@ -26,7 +26,8 @@ change bullets. Preparing this workflow leaves the package at **0.1.0**.
 ## Prepare and rehearse
 
 Use the existing checkout. Need Python 3.11+, Git, authenticated GitHub CLI,
-Rust >=1.98, CMake/C compiler, binutils (`objdump`), `ldd`, and the normal build
+Rust >=1.98, CMake/C compiler, binutils (`objdump`), `ldd`, and SQLite development
+files (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch), plus the normal build
 dependencies from [integration.md](integration.md). GitHub authentication needs
 read access for preflight; publication needs repository release/tag write access.
 No credential is stored by these scripts.
