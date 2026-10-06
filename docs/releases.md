@@ -42,13 +42,14 @@ No credential is stored by these scripts.
 3. Rehearse with the same command used for publication:
 
    ```sh
+   export PATH="$HOME/.cargo/bin:$PATH" # for Rust installed with rustup
    python3 scripts/release.py --dry-run --build-dir ~/build/ytfast --output ~/build/ytfast/rehearsal
    ```
 
    Dry-run is also the default. It **does build and package**, but only reads
    GitHub; it never creates tags/releases. Output must be a new directory outside
    the checkout. Use a fresh output path for each attempt. Cargo dependencies can
-   be reused in the build directory. On Halla, run the build within the usual
+   be reused in the build directory. On smaller machines, use the usual
    user-systemd resource limits when needed (for example MemoryMax=6G,
    CPUQuota=100%); the script serializes Cargo with `-j 1`.
 
@@ -77,6 +78,7 @@ The publication target always comes from `package.repository`, **not origin**
 (a contributor checkout may still have a different origin).
 
 ```sh
+export PATH="$HOME/.cargo/bin:$PATH" # for Rust installed with rustup
 python3 scripts/release.py --publish --build-dir ~/build/ytfast --output ~/build/ytfast/published-candidate
 ```
 
