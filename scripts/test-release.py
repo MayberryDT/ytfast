@@ -39,7 +39,7 @@ def main():
                 if external:
                     # Run the real preflight on a baseline checkout with only a
                     # version/changelog edit; adding the tooling would be a real change.
-                    command = ["python3", "-c",
+                    command = ["python3", "-B", "-c",
                                "import importlib.util,pathlib; s=importlib.util.spec_from_file_location('release',"
                                + repr(str(ROOT / "scripts/release.py"))
                                + ");m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
