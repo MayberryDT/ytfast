@@ -92,7 +92,7 @@ Cookies are never logged or written anywhere readable by other users. While it r
 
 You need:
 
-- to build: Rust 1.98 or newer, CMake and a C compiler
+- to build: Rust 1.98 or newer, CMake, a C compiler and SQLite development files (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch)
 - to run: `mpv`, `yt-dlp`, `deno` (yt-dlp uses it for YouTube's player challenges) and `secret-tool` (libsecret)
 
 ```sh
@@ -104,6 +104,11 @@ install -Dm644 assets/ytfast.desktop ~/.local/share/applications/ytfast.desktop
 ```
 
 The release build takes several minutes and a few GB of memory. Logs go to `~/.cache/ytfast/ytfast.log`.
+
+Published Linux archives are available in [GitHub Releases](https://github.com/MayberryDT/ytfast/releases).
+`v0.1.0` is the first release. See the [changelog](CHANGELOG.md) and
+[release procedure](docs/releases.md) for version policy and the repeatable
+`python3 scripts/release.py --dry-run` / `--publish` commands.
 
 ## Development
 

@@ -108,7 +108,11 @@ ytfast keeps YouTube Music's map but has its own feel. Every moment answers inpu
 
 ## Exclusions
 
-Video playback; audio visualizers; downloads, offline mode or any on-disk audio cache; scrobbling and presence services; podcasts; uploads; macOS/Windows; packaged releases (AUR, binaries, self-update); being signed in to more than one account at once; non-Chromium browsers' cookies.
+Video playback; audio visualizers; downloads, offline mode or any on-disk audio cache; scrobbling and presence services; podcasts; uploads; macOS/Windows; AUR packaging and self-update; being signed in to more than one account at once; non-Chromium browsers' cookies.
+
+Native Linux binary releases are supported through [the release procedure](releases.md).
+The first public release is v0.1.0; package version, tag and assets follow the
+same SemVer value. Release preparation never bumps or publishes automatically.
 
 ## Completion evidence
 

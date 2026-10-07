@@ -5,6 +5,7 @@ Read this before touching sign-in, playback or the build. Update it when a fact 
 ## Verified facts
 
 - **Toolchain:** Rust 1.98 (ZapFast and Spotifast declare `rust-version = "1.98"`), CMake and a C compiler for the build; at runtime `mpv`, `yt-dlp`, `deno` (yt-dlp's runtime for YouTube's JS challenges) and `secret-tool` (libsecret).
+- **SQLite build dependency:** rusqlite links system SQLite. A runtime `libsqlite3.so.0` alone is insufficient for linking; install the development library/headers (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch). The release workflow preserves Cargo's JSON error diagnostics, including linker failures.
 - **Chromium cookie decryption on Linux** (checked 2026-09-30 with Brave Origin 153 and Google Chrome, both using `--password-store=gnome-libsecret`): password = `secret-tool lookup application <brave|chrome|chromium>` with the trailing newline stripped. Key = PBKDF2-HMAC-SHA1(password, `saltysalt`, 1 iteration, 16 bytes); AES-128-CBC with an IV of 16 spaces over the bytes after the `v11` prefix; then PKCS#7 unpadding. From cookie DB schema version 24 the plaintext starts with SHA-256(`host_key`) (32 bytes); strip it. `Local State`'s `os_crypt.portal.prev_init_success = false` means the portal key provider is not in use. Copy the DB before reading; the browser holds it open.
 - **yt-dlp's own browser import doesn't help:** `--cookies-from-browser brave:<profile>` decrypted 0 cookies ("cannot decrypt v11 cookies: no key found"), and `brave+gnomekeyring` needs the Python `secretstorage` module, which a system yt-dlp may lack. So ytfast decrypts the cookies itself and gives yt-dlp a Netscape cookie file (mode 0600, a fresh copy per run, because yt-dlp rewrites the files it's given).
 - **Exported cookies go stale:** YouTube rotates session cookies, and an exported `cookies.txt` is soon rejected ("cookies are no longer valid… rotated in the browser"). Re-read the live store at launch and on auth failure.
@@ -64,6 +65,12 @@ cargo clippy --all-targets --features e2e -- -D warnings
 A release build from clean takes about 5 minutes on a 4-core desktop CPU and a few GB of memory. On a small machine, cap it, for example `systemd-run --user --wait --pipe -q -p MemoryMax=5G --working-directory=$PWD -- cargo build --release -j 4`. If two different Rust toolchains are installed, make sure one rustc builds everything (`E0514` otherwise); a machine-local `.cargo/config.toml` (gitignored) can pin `build.rustc`.
 
 ## E2E runs
+
+Release packaging and publication use [releases.md](releases.md) and
+`scripts/release.py`, with Cargo.toml as the authoritative version. The release
+command checks formatting/Clippy, builds with `--locked --release` without e2e,
+then packages and verifies the actual executable. Dry-run performs no GitHub
+writes or installation; CLI/linkage smoke does not replace native acceptance.
 
 `scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore]` builds with the `e2e` feature and runs the real app on the desktop with the real account, network, yt-dlp and mpv. `src/e2e.rs` clicks controls by their accessible names (`ui::named`) with synthetic pointer events through egui's own input pipeline, types, presses keys, drags, takes framebuffer screenshots and records measurements. It writes `artifacts/e2e/<UTC>-<scenario>/` (gitignored: account data).
 
