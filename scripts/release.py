@@ -75,9 +75,12 @@ def preflight(publish):
     head = run("git", "rev-parse", "HEAD")
 
     # Read GitHub explicitly, never infer the publication target from origin.
-    releases = run("gh", "api", "--hostname", "github.com", f"repos/{repo}/releases?per_page=100", "--paginate", "--jq",
-                   '.[] | select(.draft == false and .prerelease == false) | .tag_name').splitlines()
-    require(tag not in releases, f"release {tag} already exists; never rewrite a published version")
+    release_query = ("gh", "api", "--hostname", "github.com", f"repos/{repo}/releases?per_page=100", "--paginate", "--jq")
+    all_releases = run(*release_query, '.[] | .tag_name').splitlines()
+    require(tag not in all_releases, f"release {tag} already exists; inspect it, never overwrite")
+    # Drafts can exist without tags; reserve their names without using them as
+    # the published stable baseline for choosing the next version.
+    releases = run(*release_query, '.[] | select(.draft == false and .prerelease == false) | .tag_name').splitlines()
     require(not remote_commit(url, "refs/tags/" + tag), f"remote tag {tag} already exists; inspect it, do not overwrite")
     local_tag = subprocess.run(["git", "rev-parse", "--verify", "refs/tags/" + tag],
                                cwd=ROOT, capture_output=True)

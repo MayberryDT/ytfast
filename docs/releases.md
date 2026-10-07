@@ -39,7 +39,9 @@ No credential is stored by these scripts.
 2. Run `python3 scripts/release.py --check`. It requires clean tracked and
    untracked source, synchronized manifest/lock, a meaningful changelog, correct
    next SemVer, real changes since the preceding release, and no existing local
-   or remote target tag/release. GitHub lookup errors stop the process.
+   or remote target tag/release, including drafts and prereleases without tags.
+   Only published stable releases determine the version baseline. GitHub lookup
+   errors stop the process.
 3. Rehearse with the same command used for publication:
 
    ```sh

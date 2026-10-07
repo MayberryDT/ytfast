@@ -34,7 +34,7 @@ def main():
                 run("git", "-c", "user.name=Release smoke", "-c", "user.email=smoke@example.invalid",
                     "commit", "-qm", "Isolated release preflight fixture", cwd=tree)
 
-            def check(expected, external=False):
+            def check(expected, external=False, extra_releases=None):
                 command = ["python3", "scripts/release.py", "--check"]
                 if external:
                     # Run the real preflight on a baseline checkout with only a
@@ -44,13 +44,34 @@ def main():
                                + repr(str(ROOT / "scripts/release.py"))
                                + ");m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
                                "m.ROOT=pathlib.Path.cwd();m.main()", "--check"]
+                if extra_releases is not None:
+                    # Inject only release-list results: Git, source validation,
+                    # published baseline and tag lookups still use real commands.
+                    command = ["python3", "-B", "-c", f"""
+import importlib.util
+s = importlib.util.spec_from_file_location('release', 'scripts/release.py')
+m = importlib.util.module_from_spec(s)
+s.loader.exec_module(m)
+original = m.run
+def run(*args, **kwargs):
+    result = original(*args, **kwargs)
+    if args[:2] == ('gh', 'api') and any('/releases?' in arg for arg in args):
+        extra = {extra_releases!r}
+        if 'select(' in args[-1]:
+            extra = [r for r in extra if not r['draft'] and not r['prerelease']]
+        result += ''.join('\\n' + r['tag_name'] for r in extra)
+    return result
+m.run = run
+m.main()
+""", "--check"]
                 p = subprocess.run(command, cwd=tree,
                                    text=True, capture_output=True)
                 if expected == "pass":
                     assert p.returncode == 0, p.stderr
                 else:
                     assert p.returncode != 0 and expected in p.stderr, (expected, p.stdout, p.stderr)
-                print(json.dumps({"case": expected, "exit": p.returncode}))
+                print(json.dumps({"case": expected, "exit": p.returncode,
+                                  "extra_releases": extra_releases}))
 
             manifest = tree / "Cargo.toml"
             lock = tree / "Cargo.lock"
@@ -71,6 +92,14 @@ def main():
             (tree / "docs/release-smoke-only.txt").write_text("Isolated regression fixture change, never shipped.\n")
             commit()
             check("pass")
+            # These releases intentionally have no remote/local tag. A stable
+            # baseline filter must not hide collisions or include other drafts.
+            for draft, prerelease in [(True, False), (False, True)]:
+                check("already exists", extra_releases=[
+                    {"tag_name": "v" + next_fix, "draft": draft, "prerelease": prerelease}])
+            check("pass", extra_releases=[
+                {"tag_name": "v99.0.0", "draft": True, "prerelease": False},
+                {"tag_name": "v98.0.0", "draft": False, "prerelease": True}])
             good = run("git", "rev-parse", "HEAD", cwd=tree).strip()
 
             (tree / "untracked-file").write_text("dirty")
