@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-09
+
+Change type: feature
 
 - Fix playback stalling with the play button and spinner flickering: Repeat one
   no longer loops a stream URL in mpv after YouTube expires it (about six hours);
@@ -13,8 +15,7 @@
   chosen makes the songs after the current one that radio.
 - Buttons and chips share one square-cornered box shape instead of pills.
 - Add a repeatable SemVer release command and documented preflight, packaging,
-  provenance, checksum verification and publication procedure. Version remains
-  0.1.0 until a real next release is prepared and authorized.
+  provenance, checksum verification and publication procedure.
 
 ## 0.1.0 — 2026-10-06
 
