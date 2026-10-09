@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use super::widgets::{font, label, pill};
+use super::widgets::{chip_button, font, label};
 use crate::account::{AccountAction, Dialog, Marks};
 use crate::app::{Action, App, LibraryTab, View};
 use crate::icons::Icon;
@@ -438,7 +438,7 @@ fn drag_chip(ctx: &egui::Context, pos: egui::Pos2, title: &str, p: &Palette) {
     );
     painter.rect(
         rect,
-        CornerRadius::same(8),
+        CornerRadius::same(4),
         p.panel,
         Stroke::new(1.0, p.outline),
         egui::StrokeKind::Inside,
@@ -494,7 +494,7 @@ pub(super) fn header_actions(ui: &mut Ui, h: &Header, p: &Palette, actions: &mut
         } else {
             ("Save to library", Icon::Plus)
         };
-        if pill(ui, text, Some(icon), false, p).clicked() {
+        if chip_button(ui, text, Some(icon), false, p).clicked() {
             actions.push(Action::Account(AccountAction::Save {
                 playlist_id: library.playlist_id.clone(),
                 title: h.title.clone(),
@@ -506,9 +506,9 @@ pub(super) fn header_actions(ui: &mut Ui, h: &Header, p: &Palette, actions: &mut
     if let Some(subscription) = &h.subscription {
         let subscribed = s.marks.subscribed(subscription);
         let response = if subscribed {
-            pill(ui, "Subscribed", Some(Icon::Check), false, p).on_hover_text("Unsubscribe")
+            chip_button(ui, "Subscribed", Some(Icon::Check), false, p).on_hover_text("Unsubscribe")
         } else {
-            pill(ui, "Subscribe", None, true, p)
+            chip_button(ui, "Subscribe", None, true, p)
         };
         if response.clicked() {
             actions.push(Action::Account(AccountAction::Subscribe {
@@ -520,7 +520,7 @@ pub(super) fn header_actions(ui: &mut Ui, h: &Header, p: &Palette, actions: &mut
         ui.add_space(8.0);
     }
     if let Some(playlist_id) = &h.editable {
-        if pill(ui, "Edit playlist", Some(Icon::Pencil), false, p).clicked() {
+        if chip_button(ui, "Edit playlist", Some(Icon::Pencil), false, p).clicked() {
             actions.push(Action::Account(AccountAction::Dialog(Some(
                 Dialog::EditPlaylist {
                     playlist_id: playlist_id.clone(),
@@ -530,7 +530,7 @@ pub(super) fn header_actions(ui: &mut Ui, h: &Header, p: &Palette, actions: &mut
             ))));
         }
         ui.add_space(8.0);
-        if pill(ui, "Delete playlist", Some(Icon::Trash), false, p).clicked() {
+        if chip_button(ui, "Delete playlist", Some(Icon::Trash), false, p).clicked() {
             actions.push(Action::Account(AccountAction::Dialog(Some(
                 Dialog::DeletePlaylist {
                     playlist_id: playlist_id.clone(),
@@ -552,7 +552,7 @@ pub(super) fn library_actions(
         return;
     }
     ui.add_space(12.0);
-    if pill(ui, "New playlist", Some(Icon::Plus), true, p).clicked() {
+    if chip_button(ui, "New playlist", Some(Icon::Plus), true, p).clicked() {
         actions.push(Action::Account(AccountAction::Dialog(Some(
             Dialog::NewPlaylist {
                 title: String::new(),
@@ -786,7 +786,7 @@ pub(super) fn dialogs(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if pill(ui, "New playlist", Some(Icon::Plus), false, p).clicked() {
+                        if chip_button(ui, "New playlist", Some(Icon::Plus), false, p).clicked() {
                             actions.push(Action::Account(AccountAction::Dialog(Some(
                                 Dialog::NewPlaylist {
                                     title: String::new(),
@@ -797,7 +797,7 @@ pub(super) fn dialogs(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec
                             keep = false;
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if pill(ui, "Cancel", None, false, p).clicked() {
+                            if chip_button(ui, "Cancel", None, false, p).clicked() {
                                 keep = false;
                             }
                         });
@@ -820,11 +820,11 @@ fn buttons(ui: &mut Ui, confirm: &str, enabled: bool, p: &Palette) -> (bool, boo
     ui.add_space(6.0);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         let done = ui
-            .add_enabled_ui(enabled, |ui| pill(ui, confirm, None, true, p))
+            .add_enabled_ui(enabled, |ui| chip_button(ui, confirm, None, true, p))
             .inner
             .clicked();
         ui.add_space(8.0);
-        let cancel = pill(ui, "Cancel", None, false, p).clicked();
+        let cancel = chip_button(ui, "Cancel", None, false, p).clicked();
         (cancel, done)
     })
     .inner

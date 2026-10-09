@@ -446,7 +446,6 @@ impl super::Worker {
                 }
             }
         }
-        self.apply_loop().await;
         self.apply_volumes().await;
         let _ = cued.mpv.set("pause", json!(false)).await;
         let entry = cued.next.entry;

@@ -8,8 +8,8 @@
 use serde_json::Value;
 
 use crate::model::{
-    Chip, Header, Item, ItemKind, Lyrics, Page, Run, Shelf, ShelfStyle, Target, Track, WatchNext,
-    parse_duration,
+    Chip, Header, Item, ItemKind, Lyrics, Page, RadioChip, Run, Shelf, ShelfStyle, Target, Track,
+    WatchNext, parse_duration,
 };
 
 /// Follows object keys; a key that parses as a number indexes an array.
@@ -1008,7 +1008,35 @@ pub fn watch_next(v: &Value) -> WatchNext {
         }
     }
     out.like = watch_like(v);
+    out.chips = radio_chips(v);
     out
+}
+
+/// The chips over a radio's queue; each fetches the radio tuned its way.
+fn radio_chips(v: &Value) -> Vec<RadioChip> {
+    let cloud = find(v, "musicQueueRenderer")
+        .and_then(|q| q.get("subHeaderChipCloud"))
+        .and_then(|c| find(c, "chipCloudRenderer"));
+    array(cloud.and_then(|c| c.get("chips")))
+        .iter()
+        .filter_map(|c| {
+            let c = c.get("chipCloudChipRenderer")?;
+            let label = text(c.get("text"));
+            let fetch = at(
+                c,
+                &[
+                    "navigationEndpoint",
+                    "queueUpdateCommand",
+                    "fetchContentsCommand",
+                ],
+            )?;
+            (!label.is_empty()).then_some(RadioChip {
+                label,
+                target: endpoint(fetch)?,
+                selected: c.get("isSelected").and_then(Value::as_bool) == Some(true),
+            })
+        })
+        .collect()
 }
 
 pub fn lyrics(v: &Value) -> Option<Lyrics> {

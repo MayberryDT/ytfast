@@ -286,6 +286,15 @@ impl Resolver {
             }));
         }
         #[cfg(feature = "e2e")]
+        if let Some(url) = crate::e2e::stand_in(video_id) {
+            return Request::Ready(Ok(Stream {
+                itag: 251,
+                url,
+                user_agent: None,
+                expires: now() + 3600,
+            }));
+        }
+        #[cfg(feature = "e2e")]
         if crate::e2e::offline() {
             return Request::Ready(Err(anyhow!("Unable to reach YouTube (simulated offline)")));
         }

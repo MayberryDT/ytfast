@@ -134,6 +134,9 @@ pub enum Action {
     },
     Search(String),
     NowPlaying(bool),
+    /// Opens Now Playing for a song that is starting; its cover is already
+    /// flying there.
+    OpenNowPlaying,
     NowPlayingTab(NowPlayingTab),
     Retry(String),
     /// Fetch a page without opening it (Now Playing's Related tab).
@@ -683,6 +686,7 @@ impl App {
                 }
                 self.now_playing = open;
             }
+            Action::OpenNowPlaying => self.now_playing = true,
             Action::NowPlayingTab(tab) => self.now_playing_tab = tab,
             Action::Load(target) => self.ensure_page(target, false),
             Action::Retry(key) => {

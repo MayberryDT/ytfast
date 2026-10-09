@@ -1,7 +1,9 @@
 use super::motion;
 use super::pages::skeleton_shelf;
 use super::shelves::shelf_view;
-use super::widgets::{cover, font, label, landing_cover, named, pill, runs_line, track_line};
+use super::widgets::{
+    chip, chip_button, cover, font, label, landing_cover, named, runs_line, track_line,
+};
 use crate::app::{Action, App, NowPlayingTab};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -31,18 +33,46 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         pos2(art_area.center().x, art_area.top() + size / 2.0 + 8.0),
         Vec2::splat(size),
     );
-    let url = current.and_then(|t| t.thumbnail.as_deref());
-    landing_cover(ui, motion::now_playing_site(), art, url, false, 8, p);
-    if let Some(url) = url {
+    // A song just clicked flies here before the queue has it: its cover
+    // holds the place until the song is current.
+    let site = motion::now_playing_site();
+    let url = match current {
+        Some(track) => track.thumbnail.clone(),
+        None => {
+            motion::landing_at(ui.ctx(), site).or_else(|| motion::unclaimed_for(ui.ctx(), site))
+        }
+    };
+    let url = url.as_deref();
+    landing_cover(ui, site, art, url, false, 8, p);
+    if let (Some(url), Some(_)) = (url, current) {
         motion::origin(ui.ctx(), "now-playing", url, art, 8.0);
     }
-    // A double click on the cover opens Stage.
-    let art_response = ui.interact(art, Id::new("now-playing-art"), Sense::click());
-    if named(art_response, "Now playing cover")
-        .on_hover_text("Double-click for Stage (F)")
-        .double_clicked()
-    {
+    // A click on the cover plays or pauses, as in YouTube Music; a double
+    // click opens Stage. The click waits out the double click's window, so
+    // opening Stage doesn't pause the song.
+    let art_response = named(
+        ui.interact(art, Id::new("now-playing-art"), Sense::click()),
+        "Now playing cover",
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .on_hover_text("Click to play or pause. Double-click for Stage (F)");
+    let pending = Id::new("now-playing-art-click");
+    let now = ui.input(|i| i.time);
+    if art_response.double_clicked() {
+        ui.data_mut(|d| d.remove::<f64>(pending));
         actions.push(Action::Stage(true));
+    } else if art_response.clicked() && current.is_some() {
+        ui.data_mut(|d| d.insert_temp(pending, now));
+    }
+    if let Some(at) = ui.data(|d| d.get_temp::<f64>(pending)) {
+        let window = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+        if now - at >= window {
+            ui.data_mut(|d| d.remove::<f64>(pending));
+            actions.push(Action::Command(Command::TogglePause));
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(window - (now - at)));
+        }
     }
     if let Some(track) = current {
         let mut below = ui.new_child(
@@ -82,8 +112,14 @@ pub(super) fn now_playing(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         // Where YouTube knows the most replayed part, a jump straight to it.
         if app.current_heat().is_some_and(|h| h.peak.is_some()) {
             below.add_space(10.0);
-            if super::widgets::pill(&mut below, "Jump to the most replayed part", None, false, p)
-                .clicked()
+            if super::widgets::chip_button(
+                &mut below,
+                "Jump to the most replayed part",
+                None,
+                false,
+                p,
+            )
+            .clicked()
             {
                 actions.push(Action::JumpToPeak);
             }
@@ -174,7 +210,7 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
         let signed_in = matches!(app.account, crate::model::Account::SignedIn { .. });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if upcoming > 0
-                && pill(ui, "Clear", None, false, p)
+                && chip_button(ui, "Clear", None, false, p)
                     .on_hover_text("Remove the songs after this one")
                     .clicked()
             {
@@ -182,7 +218,7 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
             }
             if signed_in && !app.queue.is_empty() {
                 ui.add_space(8.0);
-                if pill(ui, "Save", Some(Icon::AddToPlaylist), false, p)
+                if chip_button(ui, "Save", Some(Icon::AddToPlaylist), false, p)
                     .on_hover_text("Save the queue as a playlist")
                     .clicked()
                 {
@@ -192,6 +228,7 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
         });
     });
     ui.add_space(6.0);
+    radio_chips(app, ui, p, actions);
     ScrollArea::vertical()
         .id_salt("up-next")
         .auto_shrink([false, false])
@@ -420,4 +457,30 @@ fn related(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 });
         }
     }
+}
+
+/// The radio's chips (All, Popular, Deep cuts, Workout…) in a row that the
+/// wheel scrolls sideways: choosing one makes the songs after this one that
+/// radio.
+fn radio_chips(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
+    if app.playback.radio_chips.is_empty() {
+        return;
+    }
+    ui.scope(|ui| {
+        ui.style_mut().always_scroll_the_only_direction = true;
+        ScrollArea::horizontal()
+            .id_salt("radio-chips")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for c in &app.playback.radio_chips {
+                        if chip(ui, &c.label, c.selected, p).clicked() && !c.selected {
+                            actions.push(Action::Command(Command::TuneRadio(c.target.clone())));
+                        }
+                    }
+                });
+            });
+    });
+    ui.add_space(8.0);
 }

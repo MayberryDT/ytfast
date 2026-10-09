@@ -9,6 +9,8 @@ impl super::Worker {
         self.waiting_for_network = false;
         self.decks.radio = false;
         self.decks.autoplay.clear();
+        self.state.radio_chips.clear();
+        self.chips_from_queue = false;
         self.epoch
     }
 
@@ -121,6 +123,9 @@ impl super::Worker {
         self.state.gain = None;
         self.state.lyrics = None;
         self.state.related = None;
+        if !self.chips_from_queue {
+            self.state.radio_chips.clear();
+        }
         self.emit(true);
         if let Some(mpv) = &self.mpv {
             // Stop the previous song at once; the new one follows when resolved.
@@ -135,6 +140,67 @@ impl super::Worker {
         self.fetch_player(&track.video_id);
         self.maybe_extend();
         self.save_session(true);
+    }
+
+    /// Repeat one: the song that ended plays again, loaded afresh so a
+    /// stream URL that expired meanwhile is replaced. Its lyrics and
+    /// related stay.
+    async fn replay(&mut self) {
+        let Some(track) = self.current().cloned() else {
+            return;
+        };
+        self.generation += 1;
+        self.current_entry = None;
+        self.retried = false;
+        self.reported = false;
+        self.asked = Instant::now();
+        self.state.loading = true;
+        self.state.position = 0.0;
+        self.emit(true);
+        self.resolve_current(&track.video_id);
+        self.save_session(true);
+    }
+
+    /// A radio chip: the songs after the current one become that radio,
+    /// started from the current song, which plays on. The chip shows as
+    /// chosen at once.
+    pub(super) fn tune_radio(&mut self, target: Target) {
+        let Some(current) = self.current().map(|t| t.video_id.clone()) else {
+            return;
+        };
+        let Target::Watch {
+            playlist_id,
+            params,
+            ..
+        } = target.clone()
+        else {
+            return;
+        };
+        for chip in &mut self.state.radio_chips {
+            chip.selected = chip.target == target;
+        }
+        self.chips_from_queue = true;
+        self.emit(true);
+        // Pages of the list and radio still on their way don't refill it.
+        self.epoch += 1;
+        self.extending = false;
+        self.advance_pending = false;
+        let epoch = self.epoch;
+        let target = Target::Watch {
+            video_id: Some(current),
+            playlist_id,
+            params,
+        };
+        let client = self.client.clone();
+        let tx = self.internal_tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .next(&target)
+                .await
+                .map(|v| parse::watch_next(&v))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Internal::Tuned { epoch, result });
+        });
     }
 
     /// Resolves the current song for playback. Its share of the run is
@@ -160,10 +226,11 @@ impl super::Worker {
         let generation = self.generation;
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
+        // Asked as the song's radio, which brings that radio's chips.
         let target = Target::Watch {
             video_id: Some(video_id.to_owned()),
-            playlist_id: None,
-            params: None,
+            playlist_id: Some(format!("RDAMVM{video_id}")),
+            params: Some("wAEB".into()),
         };
         tokio::spawn(async move {
             if let Ok(value) = client.next(&target).await {
@@ -184,13 +251,15 @@ impl super::Worker {
             let id = after.video_id.clone();
             self.resolver.prepare(&id);
         }
-        // With the sleep timer at the song's end, nothing follows in mpv.
-        if self.sleeping_at_song_end() {
-            return;
-        }
         let Some(entry) = self.queue.get(pos + 1) else {
             return;
         };
+        // Repeat one, or the sleep timer at the song's end: nothing follows
+        // in mpv, but Next is still quick.
+        if self.held_at_song_end() {
+            self.resolver.prepare(&entry.track.video_id);
+            return;
+        }
         if self.appended.as_ref().is_some_and(|a| a.id == entry.id)
             || self
                 .decks
@@ -246,7 +315,6 @@ impl super::Worker {
             {
                 Ok(mpv) => {
                     self.mpv = Some(mpv.clone());
-                    self.apply_loop().await;
                     self.apply_equalizer(&mpv).await;
                 }
                 Err(error) => {
@@ -452,7 +520,7 @@ impl super::Worker {
                     || self.appended.is_some()
                     || self.decks.cued.is_some()
                     || self.current_entry.is_none()
-                    || self.sleeping_at_song_end()
+                    || self.held_at_song_end()
                 {
                     return;
                 }
@@ -483,6 +551,9 @@ impl super::Worker {
                 }
                 self.state.lyrics = info.lyrics;
                 self.state.related = info.related;
+                if !self.chips_from_queue {
+                    self.state.radio_chips = info.chips;
+                }
                 if let Some(like) = info.like {
                     self.sink.send(Event::Likes(vec![like]));
                 }
@@ -495,6 +566,10 @@ impl super::Worker {
                 match result {
                     Ok(info) => {
                         let start = info.current;
+                        if !info.chips.is_empty() {
+                            self.state.radio_chips = info.chips;
+                            self.chips_from_queue = true;
+                        }
                         self.set_queue(info.tracks, start);
                         if let Some(pos) = self.pos {
                             self.start(pos).await;
@@ -585,6 +660,37 @@ impl super::Worker {
                     });
                 }
             }
+            Internal::Tuned { epoch, result } => {
+                if epoch != self.epoch {
+                    return;
+                }
+                match result {
+                    Ok(info) => {
+                        let current = self.current().map(|t| t.video_id.clone());
+                        let tracks: Vec<Track> = info
+                            .tracks
+                            .into_iter()
+                            .filter(|t| Some(&t.video_id) != current.as_ref())
+                            .collect();
+                        self.edit_queue(|queue, pos, _| {
+                            if let Some(pos) = pos {
+                                queue.clear_after(pos);
+                            }
+                            queue.extend(tracks);
+                        })
+                        .await;
+                        // It plays on as a radio: Smooth mixes blend it.
+                        self.decks.radio = true;
+                        if !info.chips.is_empty() {
+                            self.state.radio_chips = info.chips;
+                        }
+                        self.emit(true);
+                    }
+                    Err(error) => self
+                        .sink
+                        .send(Event::Error(format!("Couldn't load that radio: {error}"))),
+                }
+            }
             Internal::Online { generation } => {
                 if generation == self.generation
                     && self.waiting_for_network
@@ -608,6 +714,10 @@ impl super::Worker {
         self.stop_tail().await;
         if !self.retried {
             self.retried = true;
+            // A stream that dies part way picks up where it stopped.
+            if self.state.position > 0.0 {
+                self.resume_at = Some(self.state.position);
+            }
             self.resolver.forget(&track.video_id);
             self.resolve_current(&track.video_id);
             return;
@@ -680,6 +790,9 @@ impl super::Worker {
         self.state.gain = next.gain;
         self.state.lyrics = None;
         self.state.related = None;
+        if !self.chips_from_queue {
+            self.state.radio_chips.clear();
+        }
         self.emit(true);
         if let Some(track) = track {
             self.fetch_watch_info(&track.video_id);
@@ -728,8 +841,15 @@ impl super::Worker {
                     }
                 }
                 "paused-for-cache" | "seeking" => {
+                    // Either one waiting is loading; one ending doesn't end the other.
+                    let on = data.as_bool() == Some(true);
+                    if name == "seeking" {
+                        self.seeking = on;
+                    } else {
+                        self.buffering = on;
+                    }
                     if !self.waiting_for_network {
-                        self.state.loading = data.as_bool() == Some(true);
+                        self.state.loading = self.buffering || self.seeking;
                         self.emit(true);
                     }
                 }
@@ -783,15 +903,28 @@ impl super::Worker {
                 if Some(entry) != self.current_entry {
                     return;
                 }
+                // mpv reports a stream that stopped working (its URL expired
+                // during a long song or pause, or the connection dropped) as
+                // the song's end: one well short of the length is a failure.
+                let cut_short = !self.retried
+                    && self.state.duration > 0.0
+                    && self.state.position < self.state.duration - 5.0;
                 match reason.as_str() {
-                    "eof"
-                        if self.appended.is_none()
-                            && (self.state.repeat != Repeat::One
-                                || self.sleeping_at_song_end()) =>
-                    {
-                        self.next(true).await
+                    "eof" if !cut_short => {
+                        if self.appended.is_some() {
+                            // mpv moves on to it itself, gapless.
+                        } else if self.state.repeat == Repeat::One && !self.sleeping_at_song_end() {
+                            self.replay().await;
+                        } else {
+                            self.next(true).await;
+                        }
                     }
-                    "error" => {
+                    "eof" | "error" => {
+                        log::warn!(
+                            "the stream stopped at {:.0}s of {:.0}s",
+                            self.state.position,
+                            self.state.duration
+                        );
                         // Keep mpv from moving on to the queued track: this one is
                         // retried or skipped first.
                         self.drop_appended().await;
@@ -807,6 +940,8 @@ impl super::Worker {
             MpvEvent::StartFile { entry } => log::debug!("mpv start-file {entry}"),
             MpvEvent::Died => {
                 self.mpv = None;
+                self.buffering = false;
+                self.seeking = false;
                 self.af.clear();
                 self.appended = None;
                 self.current_entry = None;

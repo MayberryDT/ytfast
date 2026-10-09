@@ -110,6 +110,9 @@ pub enum Command {
     },
     /// Remove every song after the current one.
     ClearUpcoming,
+    /// A radio chip over Up next: the songs after the current one become
+    /// that radio, started from the current song.
+    TuneRadio(Target),
     /// Set (`Some`) or cancel the sleep timer.
     SleepTimer(Option<Sleep>),
     Equalizer(Equalizer),
@@ -322,6 +325,11 @@ enum Internal {
         epoch: u64,
         result: Result<WatchNext, String>,
     },
+    /// A radio chip's songs, to follow the current one.
+    Tuned {
+        epoch: u64,
+        result: Result<WatchNext, String>,
+    },
     /// More queue: a long playlist's next page, or the autoplay radio.
     Extended {
         epoch: u64,
@@ -409,6 +417,12 @@ struct Worker {
     /// mpv's `pause` and `idle-active`: playing means neither.
     paused: bool,
     idle: bool,
+    /// The radio chips shown came with the queue (or a chip picked), not
+    /// with the current song.
+    chips_from_queue: bool,
+    /// mpv's `paused-for-cache` and `seeking`: loading means either.
+    buffering: bool,
+    seeking: bool,
     /// Where the current song starts when it next loads: a restored
     /// session's position, or a seek made before Play.
     resume_at: Option<f64>,
@@ -473,6 +487,9 @@ impl Worker {
             last_emit: Instant::now(),
             paused: false,
             idle: true,
+            chips_from_queue: false,
+            buffering: false,
+            seeking: false,
             resume_at: None,
             resolving: None,
             prefetching: None,
@@ -692,7 +709,12 @@ impl Worker {
                     Repeat::All => Repeat::One,
                     Repeat::One => Repeat::Off,
                 };
-                self.apply_loop().await;
+                if self.held_at_song_end() {
+                    self.drop_appended().await;
+                } else if self.state.repeat == Repeat::Off && self.current_entry.is_some() {
+                    // Out of repeat one: the next song is queued behind again.
+                    self.prefetch();
+                }
                 self.requeue_next().await;
                 self.emit(true);
                 self.save_session(true);
@@ -783,6 +805,7 @@ impl Worker {
                     .await;
                 }
             }
+            Command::TuneRadio(target) => self.tune_radio(target),
             Command::SleepTimer(choice) => self.set_sleep(choice).await,
             Command::Equalizer(equalizer) => self.set_equalizer(equalizer).await,
             Command::Normalize(on) => self.set_normalize(on).await,

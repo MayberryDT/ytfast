@@ -3,7 +3,7 @@
 # on this machine's desktop with the signed-in browser session. Run them from
 # the repository, on a machine you don't mind it taking over:
 #
-#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|surfaces|deck|control]
+#   scripts/e2e.sh [journey|recovery|offline|theme|showcase|motion|pages|desktop|account|engine|engine-restore|surfaces|deck|control|expiry|radio]
 #
 #   journey   every surface, playback (Premium, gapless, seek, next), history
 #   recovery  signed out → Reconnect; a stream that fails once, one that keeps failing
@@ -33,6 +33,12 @@
 #             timed to audible), right-click menus (Play next, Add to queue, Go to
 #             artist, Copy link), the queue saved as a playlist and deleted again;
 #             leaves the account, volume, shuffle and repeat as found
+#   expiry    a song click flies into Now Playing; its cover plays and pauses and a
+#             double click opens Stage; a stream URL that expires part way picks up
+#             where it stopped, and repeat one carries on past one (a local stand-in
+#             stream that refuses expired tokens); puts repeat back
+#   radio     a song's radio chips in Up next; one chosen makes the songs after it
+#             that radio while the song plays on; Next plays its first song
 #
 # Each builds with the `e2e` feature, runs the real app through the steps in
 # src/e2e.rs, and leaves screenshots, logs and summary.json in

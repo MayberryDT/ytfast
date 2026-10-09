@@ -25,7 +25,7 @@ These were taken signed out, so they show public YouTube Music rather than anyon
 
 The YouTube Music you know, with its own feel:
 
-- **Covers that fly.** Open an album and its cover lifts out of the card into the page; Back sends it home. Songs fly into the player, and Now Playing opens out of it.
+- **Covers that fly.** Open an album and its cover lifts out of the card into the page; Back sends it home. Click a song and its cover flies straight into Now Playing; click that big cover to pause.
 - **Song changes you see but never hear.** Playback is gapless; at the change the next cover and title roll into the player.
 - **Now Playing** with lyrics that follow the song line by line (from YouTube Music, or [LRCLIB](https://lrclib.net) when it has none). Click a line to jump there.
 - **Stage** (`F`): the cover and large lyrics fill the window. For a second screen or a party.
@@ -53,7 +53,7 @@ Right-click a song, album, playlist or artist (or use its **⋮**) for Play next
 
 **Ctrl+K** opens Play anything: type and it finds your library, recent searches, the page you're on and YouTube Music; Enter plays the top match, Shift+Enter opens its page. It takes commands as well: `radio <song or artist>`, `like`, `next`, `pause`, `play`, `shuffle`, `repeat`, `sleep 30` (or `sleep end`), `eq bass`, `mini`.
 
-**Save** in Up next makes the queue a playlist.
+**Save** in Up next makes the queue a playlist. The chips over Up next (Popular, Deep cuts, Workout and the rest) turn the songs after this one into that kind of radio.
 ## On the desktop
 
 Closing the window keeps the music playing, with a Music icon in the bar's tray: click it to bring the window back where you left it, middle-click to play or pause, scroll to change the volume, or right-click for Next, Previous and Quit. Launching Music again, `ytfast show` or the media widget also bring it back. **Ctrl+Q** quits and stops the music; closing the window with nothing queued quits too.

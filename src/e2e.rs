@@ -42,6 +42,133 @@ pub fn sabotaged(video_id: &str) -> bool {
     }
 }
 
+/// A song whose stream is a local stand-in that YouTube-style expires on
+/// demand, for the expiry scenario: an 8-minute silent WAV served over HTTP
+/// with ranges, each resolve a fresh token; expired tokens get 403, as an
+/// expired googlevideo URL does. 8 minutes is more than mpv's 64 MiB cache.
+struct StandIn {
+    video_id: String,
+    port: u16,
+    issued: u32,
+    /// Tokens below this one are expired.
+    valid_from: u32,
+}
+
+static STAND_IN: std::sync::Mutex<Option<StandIn>> = std::sync::Mutex::new(None);
+
+const STAND_IN_BYTES: u64 = 480 * 48_000 * 4;
+
+/// The stand-in URL for `video_id`, with a fresh token, if it has one.
+pub fn stand_in(video_id: &str) -> Option<String> {
+    let mut guard = STAND_IN.lock().expect("stand-in lock");
+    let s = guard.as_mut().filter(|s| s.video_id == video_id)?;
+    s.issued += 1;
+    probe("expiry:tokens", json!(s.issued));
+    Some(format!("http://127.0.0.1:{}/{}.wav", s.port, s.issued))
+}
+
+fn start_stand_in(video_id: &str) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stand-in port");
+    let port = listener.local_addr().expect("stand-in address").port();
+    *STAND_IN.lock().expect("stand-in lock") = Some(StandIn {
+        video_id: video_id.to_owned(),
+        port,
+        issued: 0,
+        valid_from: 0,
+    });
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || serve_stand_in(stream));
+        }
+    });
+}
+
+/// Every token handed out so far expires.
+fn expire_stand_in() {
+    if let Some(s) = STAND_IN.lock().expect("stand-in lock").as_mut() {
+        s.valid_from = s.issued + 1;
+    }
+}
+
+fn serve_stand_in(mut stream: std::net::TcpStream) {
+    use std::io::{BufRead, BufReader};
+    let Ok(clone) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(clone);
+    let (mut path, mut start) = (String::new(), 0u64);
+    let mut line = String::new();
+    while reader.read_line(&mut line).is_ok_and(|n| n > 0) && line.trim() != "" {
+        if let Some(rest) = line.strip_prefix("GET ") {
+            path = rest.split(' ').next().unwrap_or_default().to_owned();
+        }
+        if let Some(range) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+            start = range
+                .split('-')
+                .next()
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0);
+        }
+        line.clear();
+    }
+    let token: u32 = path
+        .trim_start_matches('/')
+        .trim_end_matches(".wav")
+        .parse()
+        .unwrap_or(0);
+    let valid_from = STAND_IN
+        .lock()
+        .expect("stand-in lock")
+        .as_ref()
+        .map_or(u32::MAX, |s| s.valid_from);
+    if token < valid_from {
+        probe_push("expiry:refused", json!(token));
+        let _ = stream
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let total = 44 + STAND_IN_BYTES;
+    let start = start.min(total);
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&((36 + STAND_IN_BYTES) as u32).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    for field in [
+        16u32.to_le_bytes(),
+        [1, 0, 2, 0],
+        48_000u32.to_le_bytes(),
+        192_000u32.to_le_bytes(),
+        [4, 0, 16, 0],
+    ] {
+        header.extend_from_slice(&field);
+    }
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&(STAND_IN_BYTES as u32).to_le_bytes());
+    let head = format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{total}\r\nConnection: close\r\n\r\n",
+        total - start,
+        total - 1
+    );
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    let mut at = start;
+    if at < 44 {
+        if stream.write_all(&header[at as usize..]).is_err() {
+            return;
+        }
+        at = 44;
+    }
+    let silence = vec![0u8; 64 * 1024];
+    while at < total {
+        let n = (total - at).min(silence.len() as u64) as usize;
+        if stream.write_all(&silence[..n]).is_err() {
+            return;
+        }
+        at += n as u64;
+    }
+}
+
 /// Simulated loss of connection: streams fail and YouTube reads as unreachable.
 static OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -123,6 +250,8 @@ fn scenario(name: &str) -> Vec<Step> {
         "surfaces" => surfaces(),
         "deck" => deck(),
         "control" => control(),
+        "expiry" => expiry(),
+        "radio" => radio(),
         _ => journey(),
     }
 }
@@ -200,6 +329,9 @@ fn motion() -> Vec<Step> {
         wait("playing", 60.0, |a| a.playback.playing),
         Step::Sleep(2.0),
         Step::Screenshot("05-playing"),
+        // A song click opens Now Playing; the handoff below is the player bar's.
+        click("Close player"),
+        Step::Sleep(1.0),
         click("Next"),
     ]);
     steps.extend(burst(&[
@@ -486,6 +618,7 @@ fn showcase() -> Vec<Step> {
         wait("playing", 90.0, |a| {
             a.playback.playing && a.playback.position > 0.5
         }),
+        click("Close player"),
         run("seek a third in", |a| {
             a.backend.send(Command::Seek(a.playback.duration * 0.35));
         }),
@@ -893,6 +1026,268 @@ fn artist_or_album(app: &App) -> bool {
 
 #[derive(Clone, Default)]
 struct Registry(Vec<(String, Rect)>);
+
+// ---- expiry: Now Playing's cover, and stream URLs that expire ----
+
+fn cycle_repeat_to(a: &mut App, want: crate::model::Repeat) {
+    use crate::model::Repeat;
+    let step = |r: Repeat| match r {
+        Repeat::Off => 0,
+        Repeat::All => 1,
+        Repeat::One => 2,
+    };
+    for _ in 0..(step(want) + 3 - step(a.playback.repeat)) % 3 {
+        a.backend.send(Command::CycleRepeat);
+    }
+}
+
+fn stand_in_playing(a: &App) -> bool {
+    current_id(a) == json!(fact("expiry:song")) && a.playback.playing
+}
+
+/// A song click flies its cover into Now Playing; a click on the cover
+/// pauses and plays, a double click opens Stage without pausing. Then the
+/// song's stream URL expires (a local stand-in, see [`stand_in`]): part way
+/// through, the song picks up where it stopped instead of ending; with
+/// repeat one, it plays again from a fresh URL instead of mpv seeking back
+/// to the start thousands of times a second (2026-10-09).
+fn expiry() -> Vec<Step> {
+    use crate::model::Repeat;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let home = View::Home.target();
+    // Loading changes seen frame by frame: (last state, changes, since).
+    type Flips = (Option<bool>, u32, Option<Instant>);
+    let flips: Rc<Cell<Flips>> = Rc::default();
+    let (f1, f2, f3) = (flips.clone(), flips.clone(), flips);
+    let mut steps = vec![
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 1)),
+        run("note repeat, then off", |a| {
+            probe(
+                "expiry:repeat_before",
+                json!(format!("{:?}", a.playback.repeat)),
+            );
+            cycle_repeat_to(a, Repeat::Off);
+        }),
+        run("clear the search field", |a| a.search.clear()),
+        click("Search"),
+        Step::Type("Daft Punk Get Lucky".into()),
+        Step::Key(egui::Key::Enter),
+        wait("search results", 60.0, searched),
+        run("Get Lucky's stream becomes the stand-in", |a| {
+            if let Some(track) = song_on_page(a, "Get Lucky") {
+                start_stand_in(&track.video_id);
+                set_fact("expiry:song", track.video_id);
+            }
+        }),
+        wait("stand-in ready", 1.0, |_| fact("expiry:song").is_some()),
+        click_with("Get Lucky's cover", |a| {
+            song_on_page(a, "Get Lucky").map(|t| format!("Play {}", t.title))
+        }),
+    ];
+    steps.extend(burst(&[
+        "x01-flight-a",
+        "x01-flight-b",
+        "x01-flight-c",
+        "x01-flight-d",
+        "x01-flight-e",
+    ]));
+    steps.extend([
+        wait("Now Playing open", 5.0, |a| a.now_playing),
+        wait("the stand-in plays", 60.0, |a| {
+            stand_in_playing(a) && a.playback.position > 0.5 && a.playback.duration > 470.0
+        }),
+        Step::Sleep(1.0),
+        Step::Screenshot("x02-now-playing"),
+        // The cover plays and pauses.
+        click("Now playing cover"),
+        wait("a click on the cover paused", 3.0, |a| !a.playback.playing),
+        Step::Screenshot("x03-paused"),
+        click("Now playing cover"),
+        wait("a click on the cover played", 3.0, |a| a.playback.playing),
+        Step::Sleep(1.0),
+        click("Now playing cover"),
+        click("Now playing cover"),
+        wait("a double click opens Stage", 3.0, |a| a.stage.open),
+        Step::Sleep(1.0),
+        measure("playing_after_double_click", |a| json!(a.playback.playing)),
+        wait("a double click doesn't pause", 0.5, |a| a.playback.playing),
+        Step::Screenshot("x04-stage"),
+        Step::Key(egui::Key::Escape),
+        wait("Stage closed", 3.0, |a| !a.stage.open),
+        // Part way through: the URL expires and the song moves past what
+        // mpv holds, so mpv asks for more and is refused.
+        Step::Sleep(2.0),
+        run("the URL expires", |_| expire_stand_in()),
+        run("seek past mpv's cache", |a| {
+            a.backend.send(Command::Seek(420.0))
+        }),
+        wait("the expired URL was refused", 15.0, |_| {
+            probed("expiry:refused")
+                .as_array()
+                .is_some_and(|r| !r.is_empty())
+        }),
+        wait("the same song carries on from 7:00", 30.0, |a| {
+            stand_in_playing(a) && a.playback.position > 421.0
+        }),
+        measure("mid_song", |a| {
+            json!({
+                "position": a.playback.position,
+                "index": a.playback.index,
+                "tokens": probed("expiry:tokens"),
+                "refused": probed("expiry:refused"),
+                "errors": a.errors,
+            })
+        }),
+        Step::Screenshot("x05-carried-on"),
+        // Repeat one past the expiry.
+        run("repeat one", |a| cycle_repeat_to(a, Repeat::One)),
+        wait("repeat one on", 3.0, |a| a.playback.repeat == Repeat::One),
+        run("the URL expires again", |_| expire_stand_in()),
+        run("seek to 4 s before the end", |a| {
+            a.backend.send(Command::Seek(a.playback.duration - 4.0))
+        }),
+        wait("played again from the start", 30.0, |a| {
+            stand_in_playing(a) && a.playback.position > 0.5 && a.playback.position < 30.0
+        }),
+        wait("5 s of playing watched", 8.0, move |a| {
+            let (last, n, since) = f1.get();
+            let since = since.unwrap_or_else(Instant::now);
+            let n = n + u32::from(last.is_some_and(|l| l != a.playback.loading));
+            f1.set((Some(a.playback.loading), n, Some(since)));
+            since.elapsed() > Duration::from_secs(5)
+        }),
+        measure("repeat_one", move |a| {
+            json!({
+                "position": a.playback.position,
+                "playing": a.playback.playing,
+                "loading_changes_in_5s": f2.get().1,
+                "tokens": probed("expiry:tokens"),
+                "refused": probed("expiry:refused"),
+            })
+        }),
+        wait("loading steady", 0.5, move |_| f3.get().1 <= 2),
+        Step::Screenshot("x06-repeat-one"),
+        run("put repeat back and pause", |a| {
+            let before = probed("expiry:repeat_before");
+            let want = match before.as_str() {
+                Some("All") => Repeat::All,
+                Some("One") => Repeat::One,
+                _ => Repeat::Off,
+            };
+            cycle_repeat_to(a, want);
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        click("Close player"),
+    ]);
+    steps
+}
+
+// ---- radio: the chips over Up next ----
+
+/// A song's radio chips show in Up next; choosing one (Workout, or else the
+/// first one not chosen) makes the songs after the current one that radio
+/// while the song plays on, and Next plays the radio's first song.
+fn radio() -> Vec<Step> {
+    let home = View::Home.target();
+    let chosen = |a: &App| -> Option<String> {
+        let chips = &a.playback.radio_chips;
+        chips
+            .iter()
+            .find(|c| c.label == "Workout" && !c.selected)
+            .or_else(|| chips.iter().find(|c| !c.selected))
+            .map(|c| c.label.clone())
+    };
+    vec![
+        wait("home loaded", 60.0, move |a| loaded(a, &home, 1)),
+        run("clear the search field", |a| a.search.clear()),
+        click("Search"),
+        Step::Type("Daft Punk Get Lucky".into()),
+        Step::Key(egui::Key::Enter),
+        wait("search results", 60.0, searched),
+        click_with("Get Lucky's cover", |a| {
+            song_on_page(a, "Get Lucky").map(|t| format!("Play {}", t.title))
+        }),
+        wait("Now Playing open", 5.0, |a| a.now_playing),
+        wait("playing", 90.0, |a| {
+            a.playback.playing && a.playback.position > 0.5
+        }),
+        wait("the song's radio chips", 30.0, |a| {
+            a.playback.radio_chips.len() > 2
+        }),
+        run("note the song, the chips and what's next", move |a| {
+            set_fact(
+                "radio:song",
+                current_id(a).as_str().unwrap_or_default().to_owned(),
+            );
+            set_fact("radio:before", json!(upcoming(a, 5)).to_string());
+            if let Some(label) = chosen(a) {
+                set_fact("radio:chip", label);
+            }
+            probe(
+                "radio:chips",
+                json!(
+                    a.playback
+                        .radio_chips
+                        .iter()
+                        .map(|c| &c.label)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }),
+        Step::Sleep(1.0),
+        Step::Screenshot("r01-chips"),
+        click_with("a radio chip", |_| fact("radio:chip")),
+        wait("the chip chosen", 2.0, |a| {
+            a.playback
+                .radio_chips
+                .iter()
+                .any(|c| c.selected && Some(&c.label) == fact("radio:chip").as_ref())
+        }),
+        wait(
+            "Up next is the chip's radio, the song plays on",
+            30.0,
+            |a| {
+                let next = json!(upcoming(a, 5)).to_string();
+                Some(next) != fact("radio:before")
+                    && upcoming(a, 1).len() == 1
+                    && current_id(a) == json!(fact("radio:song"))
+                    && a.playback.playing
+            },
+        ),
+        measure("radio", |a| {
+            json!({
+                "chips": probed("radio:chips"),
+                "chosen": fact("radio:chip"),
+                "before": fact("radio:before"),
+                "after": upcoming(a, 5),
+                "playing": current_id(a),
+            })
+        }),
+        Step::Sleep(1.0),
+        Step::Screenshot("r02-tuned"),
+        run("note the radio's first song", |a| {
+            set_fact(
+                "radio:first",
+                upcoming(a, 1).first().cloned().unwrap_or_default(),
+            );
+        }),
+        click("Next"),
+        wait("the radio's first song plays", 60.0, |a| {
+            current_id(a) == json!(fact("radio:first")) && audible(a)
+        }),
+        Step::Sleep(1.0),
+        Step::Screenshot("r03-next"),
+        run("pause", |a| {
+            if a.playback.playing {
+                a.backend.send(Command::TogglePause);
+            }
+        }),
+        click("Close player"),
+    ]
+}
 
 fn registry_id() -> Id {
     Id::new("ytfast-e2e-registry")
@@ -2517,7 +2912,7 @@ fn pages() -> Vec<Step> {
                 && a.playback.playing
                 && a.playback.position > 0.5
         }),
-        click("Open player"),
+        wait("now playing", 10.0, |a| a.now_playing),
         click("LYRICS"),
         wait("lyrics answered", 45.0, |a| lyrics_state(a) != "loading"),
         Step::Sleep(2.0),
@@ -2903,6 +3298,7 @@ fn engine() -> Vec<Step> {
         }),
         measure("cold_click_unprepared_ms", ms_since("cold")),
         measure("unprepared_song", playing_track),
+        click("Close player"),
         // A cold click on a song prepared since the page showed.
         run("pick a prepared song", |a| {
             if let Some(item) = page_items(a)
@@ -2920,6 +3316,7 @@ fn engine() -> Vec<Step> {
         }),
         measure("cold_click_prepared_ms", ms_since("warm")),
         measure("prepared_song", playing_track),
+        click("Close player"),
         // Queue edits: Play next and Add to queue (the menus that offer them
         // send these commands), then a reorder and a remove in Up next.
         run("pick four songs from Home", |a| {
@@ -3244,6 +3641,7 @@ fn surfaces() -> Vec<Step> {
         wait("playing", 90.0, |a| {
             a.playback.playing && a.playback.position > 0.5 && a.playback.duration > 0.0
         }),
+        click("Close player"),
         // Most replayed: asked for once per song, anonymously.
         wait("heat answered", 30.0, |a| {
             a.current_track()
@@ -3721,6 +4119,7 @@ fn deck() -> Vec<Step> {
         wait("the first song plays", 90.0, |a| {
             audible(a) && current_id(a) == json!(noted("deck:main", "id"))
         }),
+        click("Close player"),
         // Audition: Alt held with the pointer resting on another song.
         wait("a song on screen prepared", 120.0, |a| {
             audition_candidate(a).is_some()
@@ -3871,6 +4270,7 @@ fn deck() -> Vec<Step> {
         wait("the album plays", 90.0, |a| {
             audible(a) && current_id(a) == json!(noted("deck:album", "id"))
         }),
+        click("Close player"),
         wait("the second song queued behind it", 120.0, |a| {
             a.playback.next_ready && a.playback.duration > 20.0
         }),

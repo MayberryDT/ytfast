@@ -1,5 +1,5 @@
 use super::settings::settings;
-use super::widgets::{cover, font, icon_button, label, named, pill, runs_text};
+use super::widgets::{chip_button, cover, font, icon_button, label, named, runs_text};
 use crate::app::{Action, App, LibraryTab, View};
 use crate::backend::Command;
 use crate::icons::Icon;
@@ -416,7 +416,7 @@ pub(super) fn account(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Act
             ui.add(egui::Spinner::new().size(18.0).color(p.secondary));
         }
         Account::SignedOut { reason } | Account::Unverified { reason } => {
-            if pill(ui, "Reconnect", Some(Icon::Refresh), true, p)
+            if chip_button(ui, "Reconnect", Some(Icon::Refresh), true, p)
                 .on_hover_text(reason.as_str())
                 .clicked()
             {

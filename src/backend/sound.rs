@@ -269,14 +269,13 @@ impl super::Worker {
         )
     }
 
-    /// Repeat one loops the song in mpv, unless the timer waits for its end.
-    pub(super) async fn apply_loop(&self) {
-        let looping = self.state.repeat == Repeat::One && !self.sleeping_at_song_end();
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv
-                .set("loop-file", json!(if looping { "inf" } else { "no" }))
-                .await;
-        }
+    /// Whether nothing waits behind the current song in mpv: its end comes
+    /// back to the worker, which plays it again (repeat one) or stops (the
+    /// timer). Repeat one isn't mpv's `loop-file`: that loops the same
+    /// stream URL, and once YouTube expires it (after about six hours) mpv
+    /// seeks back to the start thousands of times a second, silent.
+    pub(super) fn held_at_song_end(&self) -> bool {
+        self.state.repeat == Repeat::One || self.sleeping_at_song_end()
     }
 
     pub(super) async fn set_sleep(&mut self, choice: Option<Sleep>) {
@@ -292,7 +291,6 @@ impl super::Worker {
             },
         });
         self.restore_fade().await;
-        self.apply_loop().await;
         if self.sleeping_at_song_end() {
             // mpv stops at this song's end instead of moving on.
             self.drop_appended().await;
@@ -386,7 +384,6 @@ impl super::Worker {
         self.sleep_stamp.fetch_add(1, Ordering::SeqCst);
         self.state.sleep = None;
         self.restore_fade().await;
-        self.apply_loop().await;
         self.state.playing = false;
         self.state.loading = false;
         if let Some(pos) = self.pos {

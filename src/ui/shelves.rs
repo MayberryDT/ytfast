@@ -1,7 +1,7 @@
 use super::motion;
 use super::widgets::{
-    cover, font, icon_button, label, landing_cover, named, pill, play_disc, resting, runs_line,
-    runs_text,
+    chip_button, cover, font, icon_button, label, landing_cover, named, play_disc, resting,
+    runs_line, runs_text,
 };
 use super::{CARD, GAP};
 use crate::app::Action;
@@ -37,16 +37,35 @@ fn play_item(item: &Item, shelf: &Shelf, actions: &mut Vec<Action>) {
     }
 }
 
-/// Where an item's cover flies when it's activated: songs and mixes start in
-/// the player, everything else opens its page under the header's cover.
+/// Where an item's cover flies when it's activated: songs and mixes start
+/// in Now Playing, as in YouTube Music, and everything else opens its page
+/// under the header's cover.
 fn destination(item: &Item, play: bool) -> egui::Id {
     let plays = item.track.is_some()
         || (play && item.play.is_some())
         || matches!(item.target, Some(crate::model::Target::Watch { .. }));
     if plays {
-        motion::player_site()
+        motion::now_playing_site()
     } else {
         motion::header_site()
+    }
+}
+
+/// Sends an activated item's cover on its way; one that starts music opens
+/// Now Playing for it to land in.
+fn launch(
+    ui: &Ui,
+    url: Option<&str>,
+    from: Rect,
+    radius: f32,
+    to: egui::Id,
+    actions: &mut Vec<Action>,
+) {
+    if let Some(url) = url {
+        motion::launch_to(ui.ctx(), url, from, radius, to);
+    }
+    if to == motion::now_playing_site() {
+        actions.push(Action::OpenNowPlaying);
     }
 }
 
@@ -87,7 +106,7 @@ pub(super) fn shelf_view(
                     ui.add_space(4.0);
                 }
                 if let Some(more) = &shelf.more
-                    && pill(ui, "More", None, false, p).clicked()
+                    && chip_button(ui, "More", None, false, p).clicked()
                 {
                     actions.push(Action::Activate(more.clone()));
                 }
@@ -327,9 +346,8 @@ fn card(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mut Vec<
         return;
     }
     if response.clicked() {
-        if let Some(url) = &item.thumbnail {
-            motion::launch_to(ui.ctx(), url, art, radius, destination(item, play_hit));
-        }
+        let to = destination(item, play_hit);
+        launch(ui, item.thumbnail.as_deref(), art, radius, to, actions);
         if play_hit {
             play_item(item, shelf, actions)
         } else {
@@ -490,18 +508,16 @@ pub(super) fn row(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
-        // A song's cover flies from its row to the player.
+        // A song's cover flies from its row to Now Playing.
         let thumb = Rect::from_min_size(
             pos2(rect.left() + 8.0, rect.center().y - 20.0),
             Vec2::splat(40.0),
         );
-        if let Some(url) = item
+        let url = item
             .thumbnail
             .as_deref()
-            .or(item.track.as_ref().and_then(|t| t.thumbnail.as_deref()))
-        {
-            motion::launch_to(ui.ctx(), url, thumb, 4.0, destination(item, false));
-        }
+            .or(item.track.as_ref().and_then(|t| t.thumbnail.as_deref()));
+        launch(ui, url, thumb, 4.0, destination(item, false), actions);
         activate(item, shelf, actions);
     }
 }
@@ -584,10 +600,12 @@ fn top_result(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mu
                     let round = item.kind == ItemKind::Artist;
                     super::audition::hook(ui, &response, track, rect, round, p, actions);
                 }
+                let thumbnail = item.thumbnail.as_deref();
                 if named(response, &item.title)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
+                    launch(ui, thumbnail, rect, 6.0, destination(item, false), actions);
                     activate(item, shelf, actions);
                 }
                 ui.add_space(20.0);
@@ -607,13 +625,15 @@ fn top_result(ui: &mut Ui, item: &Item, shelf: &Shelf, p: &Palette, actions: &mu
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
+                        launch(ui, thumbnail, rect, 6.0, destination(item, false), actions);
                         activate(item, shelf, actions);
                     }
                     runs_line(ui, &item.subtitle, 14.0, p, actions);
                     ui.add_space(10.0);
                     if (item.play.is_some() || item.track.is_some())
-                        && pill(ui, "Play", Some(Icon::Play), true, p).clicked()
+                        && chip_button(ui, "Play", Some(Icon::Play), true, p).clicked()
                     {
+                        launch(ui, thumbnail, rect, 6.0, destination(item, true), actions);
                         play_item(item, shelf, actions);
                     }
                 });

@@ -93,8 +93,8 @@ fn pause() -> Step {
 }
 
 /// Covers fly: Home's cards lift under the pointer, a search, the song's
-/// cover flies to the player, the player opens into Now Playing, the jump
-/// to the most replayed part, timed lyrics.
+/// cover flies into Now Playing, the jump to the most replayed part, timed
+/// lyrics.
 fn flight() -> Vec<Step> {
     let home = View::Home.target();
     let mut steps = ready();
@@ -128,7 +128,6 @@ fn flight() -> Vec<Step> {
         play_song(),
         wait("playing", 30.0, playing),
         Step::Sleep(1.8),
-        click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
         Step::Sleep(1.8),
         click("LYRICS"),
@@ -165,7 +164,6 @@ fn stage() -> Vec<Step> {
                 a.backend.send(Command::Seek((peak.start - 12.0).max(0.0)));
             }
         }),
-        click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
         click("LYRICS"),
         wait("timed lyrics", 30.0, |a| timed_lines(a).is_some()),
@@ -205,7 +203,6 @@ fn themes() -> Vec<Step> {
     steps.extend([
         play_song(),
         wait("playing", 30.0, playing),
-        click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
         Step::Leave,
         Step::Sleep(2.0),
@@ -297,6 +294,7 @@ fn audition() -> Vec<Step> {
                 .map(|i| format!("Play {}", i.title))
         }),
         wait("playing", 90.0, audible),
+        click("Close player"),
         wait("two more songs ready", 120.0, |a| ready_songs(a).len() >= 2),
         run("pick them", |a| {
             let songs = ready_songs(a);
@@ -350,7 +348,6 @@ fn mix() -> Vec<Step> {
             }
         }),
         wait("the radio plays", 90.0, |a| audible(a) && a.queue.len() > 5),
-        click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
         wait("the next song cued on the second deck", 120.0, |a| {
             a.playback.next_ready && a.playback.duration > 40.0
@@ -414,6 +411,7 @@ fn keys() -> Vec<Step> {
                 .map(|i| format!("Play {}", i.title))
         }),
         wait("playing", 90.0, audible),
+        click("Close player"),
         run("pick songs for the menu", |a| {
             let songs: Vec<String> = page_items(a)
                 .into_iter()
@@ -518,7 +516,6 @@ fn sound() -> Vec<Step> {
     steps.extend([
         click("Close equalizer"),
         wait("equalizer closed", 5.0, |a| !a.equalizer_open),
-        click("Open player"),
         wait("now playing", 10.0, |a| a.now_playing),
         Step::Sleep(0.6),
         click("Sleep timer"),

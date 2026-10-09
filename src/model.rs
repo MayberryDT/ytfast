@@ -221,6 +221,15 @@ impl Track {
     }
 }
 
+/// A chip over a radio's queue (All, Popular, Deep cuts, Workout…): the
+/// same radio tuned another way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadioChip {
+    pub label: String,
+    pub target: Target,
+    pub selected: bool,
+}
+
 /// The watch-next panel for a playing track.
 #[derive(Clone, Debug, Default)]
 pub struct WatchNext {
@@ -235,6 +244,8 @@ pub struct WatchNext {
     pub continuation: Option<String>,
     /// The requested song and its rating on the account.
     pub like: Option<(String, LikeStatus)>,
+    /// The radio's chips, when the queue is a radio.
+    pub chips: Vec<RadioChip>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -326,6 +337,9 @@ pub struct Playback {
     pub audition: Option<Audition>,
     /// Smooth mixes: radios and mixes crossfade between songs.
     pub mixes: Mixes,
+    /// Up next's radio chips: the queue's radio's, or else the current
+    /// song's radio's.
+    pub radio_chips: Vec<RadioChip>,
 }
 
 /// A song held under the pointer and previewed (Audition).

@@ -38,7 +38,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 
 - Clicking a song starts it and makes the surrounding list (album, playlist, search results, shelf) its queue. Starting a mix or radio loads YouTube Music's generated queue.
 - The player bar shows cover, title, artist, a seek bar with elapsed and total time, previous, play/pause and next, plus shuffle, repeat and volume.
-- **Now Playing** expands from the player bar into a large cover view with YouTube Music's three tabs: **Up next** (the queue, including autoplay continuation when enabled), **Lyrics** (when YouTube Music has them; says so when it doesn't), and **Related**. A click anywhere on the player bar that isn't one of its controls opens Now Playing, and closes it again.
+- **Now Playing** expands from the player bar into a large cover view with YouTube Music's three tabs: **Up next** (the queue, including autoplay continuation when enabled), **Lyrics** (when YouTube Music has them; says so when it doesn't), and **Related**. A click anywhere on the player bar that isn't one of its controls opens Now Playing, and closes it again. Clicking a song or mix opens Now Playing, as in YouTube Music. A click on Now Playing's cover plays or pauses; a double click opens Stage. Up next shows the radio's chips (All, Popular, Deep cuts, Workout and the like, as YouTube Music offers them) as square-cornered boxes: choosing one makes the songs after the current one that radio, from the current song.
 - When the queue reaches its end with autoplay on, playback continues with YouTube Music's radio for the last track.
 - Tracks follow each other without noticeable gaps. Seeking is responsive. Upcoming tracks are prepared ahead so a normal track change doesn't wait on network resolution.
 - Quality: the highest audio format the account can get (Premium Opus ~256 kbps when offered; otherwise the best available). Settings and Now Playing show the format actually playing. Resolving a stream takes several seconds, so upcoming queue tracks and songs the pointer rests on are prepared ahead; a cold click on an unprepared song shows loading in place until it starts.
@@ -89,7 +89,7 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 
 ytfast keeps YouTube Music's map but has its own feel. Every moment answers input in the same frame, never delays audio or navigation, and can be interrupted.
 
-- **The cover flies:** opening an album, playlist, artist or Now Playing grows the clicked cover into its new place; Back reverses it.
+- **The cover flies:** opening an album, playlist, artist or Now Playing grows the clicked cover into its new place; Back reverses it. A song's cover flies into Now Playing's.
 - **The handoff:** at a song change the next cover slides in from Up next and the title rolls over, in time with the audio.
 - **Stage:** `F` fills the window with the cover and large timed lyrics on the theme's background; clicking a line seeks to it.
 - **Most-replayed seek bar:** where YouTube has replay data, the seek bar shows it as a ridge with a jump to the peak.

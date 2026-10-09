@@ -145,8 +145,17 @@ pub(super) fn icon_button(
         .on_hover_text(tip)
 }
 
-/// A pill button, filled with the accent when `primary`.
-pub(super) fn pill(
+/// The shape every button and chip shares: a square-cornered box (Tyler
+/// liked the radio chips' look, 2026-10-09; no pills).
+const CHIP_HEIGHT: f32 = 32.0;
+const CHIP_CORNER: u8 = 4;
+
+fn chip_font() -> egui::FontId {
+    font(Weight::Medium, 13.0)
+}
+
+/// A button in the chips' box, filled with the accent when `primary`.
+pub(super) fn chip_button(
     ui: &mut Ui,
     text: &str,
     icon: Option<Icon>,
@@ -160,9 +169,9 @@ pub(super) fn pill(
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font(Weight::Medium, 14.0), fg);
+        .layout_no_wrap(text.to_owned(), chip_font(), fg);
     let icon_w = if icon.is_some() { 22.0 } else { 0.0 };
-    let size = vec2(galley.size().x + icon_w + 32.0, 36.0);
+    let size = vec2(galley.size().x + icon_w + 24.0, CHIP_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.hovered() {
         if primary {
@@ -173,12 +182,13 @@ pub(super) fn pill(
     } else {
         fill
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(18), fill);
-    let mut x = rect.left() + 16.0;
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(CHIP_CORNER), fill);
+    let mut x = rect.left() + 12.0;
     if let Some(icon) = icon {
-        icon.image(fg, 18.0).paint_at(
+        icon.image(fg, 16.0).paint_at(
             ui,
-            Rect::from_min_size(pos2(x, rect.center().y - 9.0), Vec2::splat(18.0)),
+            Rect::from_min_size(pos2(x, rect.center().y - 8.0), Vec2::splat(16.0)),
         );
         x += icon_w;
     }
@@ -301,6 +311,8 @@ pub(super) fn play_disc(ui: &mut Ui, center: egui::Pos2, radius: f32, p: &Palett
     );
 }
 
+/// A chip that picks one of several (filters, presets, radio chips),
+/// filled with the text colour when chosen.
 pub(super) fn chip(ui: &mut Ui, text: &str, selected: bool, p: &Palette) -> egui::Response {
     let (fill, fg) = if selected {
         (p.text, p.window)
@@ -309,15 +321,16 @@ pub(super) fn chip(ui: &mut Ui, text: &str, selected: bool, p: &Palette) -> egui
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font(Weight::Medium, 14.0), fg);
+        .layout_no_wrap(text.to_owned(), chip_font(), fg);
     let (rect, response) =
-        ui.allocate_exact_size(vec2(galley.size().x + 24.0, 32.0), Sense::click());
+        ui.allocate_exact_size(vec2(galley.size().x + 24.0, CHIP_HEIGHT), Sense::click());
     let fill = if response.hovered() && !selected {
         p.surface_hover
     } else {
         fill
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(CHIP_CORNER), fill);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, fg);
     named(response, text).on_hover_cursor(egui::CursorIcon::PointingHand)

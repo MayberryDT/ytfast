@@ -1,6 +1,6 @@
 use super::motion;
 use super::shelves::shelf_view;
-use super::widgets::{chip, font, label, landing_cover, pill, resting, runs_line};
+use super::widgets::{chip, chip_button, font, label, landing_cover, resting, runs_line};
 use super::{CARD, GAP};
 use crate::app::{Action, App, LibraryTab, PageState, View};
 use crate::icons::Icon;
@@ -255,7 +255,7 @@ fn notice(
         );
         ui.add_space(12.0);
         if let Some(key) = retry
-            && pill(ui, "Retry", Some(Icon::Refresh), true, p).clicked()
+            && chip_button(ui, "Retry", Some(Icon::Refresh), true, p).clicked()
         {
             actions.push(Action::Retry(key.to_owned()));
         }
@@ -372,7 +372,7 @@ fn page_header(
                     .filter_map(|i| i.track.clone())
                     .collect();
                 if h.play.is_some() || !tracks.is_empty() {
-                    let play = pill(ui, "Play", Some(Icon::Play), true, p);
+                    let play = chip_button(ui, "Play", Some(Icon::Play), true, p);
                     if resting(ui, &play)
                         && let Some(first) = tracks.first()
                     {
@@ -390,13 +390,13 @@ fn page_header(
                     ui.add_space(8.0);
                 }
                 if let Some(shuffle) = &h.shuffle {
-                    if pill(ui, "Shuffle", Some(Icon::Shuffle), false, p).clicked() {
+                    if chip_button(ui, "Shuffle", Some(Icon::Shuffle), false, p).clicked() {
                         actions.push(Action::Activate(shuffle.clone()));
                     }
                     ui.add_space(8.0);
                 }
                 if let Some(radio) = &h.radio
-                    && pill(ui, "Radio", Some(Icon::Radio), false, p).clicked()
+                    && chip_button(ui, "Radio", Some(Icon::Radio), false, p).clicked()
                 {
                     actions.push(Action::Activate(radio.clone()));
                 }

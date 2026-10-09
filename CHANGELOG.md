@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fix playback stalling with the play button and spinner flickering: Repeat one
+  no longer loops a stream URL in mpv after YouTube expires it (about six hours);
+  the song is loaded again with a fresh URL.
+- Fix songs ending early or being skipped when their stream URL expires part way
+  (a long mix or a long pause): playback picks up where it stopped.
+- Clicking a song or mix flies its cover into Now Playing and opens it; a click
+  on Now Playing's cover plays or pauses (a double click still opens Stage).
+- Add the radio chips over Up next (All, Popular, Deep cuts, Workout…): one
+  chosen makes the songs after the current one that radio.
+- Buttons and chips share one square-cornered box shape instead of pills.
 - Add a repeatable SemVer release command and documented preflight, packaging,
   provenance, checksum verification and publication procedure. Version remains
   0.1.0 until a real next release is prepared and authorized.
