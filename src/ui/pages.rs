@@ -17,11 +17,39 @@ pub(super) fn content(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec
     let mut scroll = ScrollArea::vertical()
         .id_salt(("page", &key))
         .auto_shrink([false, false]);
+    if !ui.ctx().text_edit_focused()
+        && !app.now_playing
+        && !app.stage.open
+        && !super::menu::is_open(ui.ctx())
+    {
+        let id = egui::Id::new(("page", &key)).with("keyboard-scroll");
+        let mut offset = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+        let maximum = ui
+            .data(|d| d.get_temp::<f32>(id.with("maximum")))
+            .unwrap_or(0.0);
+        let jump = ui.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
+                Some(0.0)
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
+                Some(maximum)
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                Some(offset + ui.available_height() * 0.85)
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                Some((offset - ui.available_height() * 0.85).max(0.0))
+            } else {
+                None
+            }
+        });
+        if let Some(jump) = jump {
+            offset = jump;
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
+    }
     if std::mem::take(&mut app.scroll_to_top) {
         scroll = scroll.vertical_scroll_offset(0.0);
     }
     let app: &App = app;
-    scroll.show_viewport(ui, |ui, viewport| {
+    let output = scroll.show_viewport(ui, |ui, viewport| {
         Frame::new()
             .inner_margin(Margin {
                 left: 32,
@@ -45,6 +73,18 @@ pub(super) fn content(app: &mut App, ui: &mut Ui, p: &Palette, actions: &mut Vec
         if near_bottom && let Some(state) = app.page_state(&target) {
             request_more(state, &key, actions);
         }
+    });
+    ui.data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new(("page", &key)).with("keyboard-scroll"),
+            output.state.offset.y,
+        );
+        d.insert_temp(
+            egui::Id::new(("page", &key))
+                .with("keyboard-scroll")
+                .with("maximum"),
+            (output.content_size.y - output.inner_rect.height()).max(0.0),
+        );
     });
 }
 

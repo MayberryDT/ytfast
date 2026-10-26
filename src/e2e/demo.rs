@@ -24,8 +24,79 @@ pub(super) fn scenario(name: &str) -> Vec<Step> {
         "demo-mix" => mix(),
         "demo-keys" => keys(),
         "demo-sound" => sound(),
+        "demo-radio" => radio(),
+        "demo-playlist" => playlist(),
         _ => flight(),
     }
+}
+
+/// Find a song, sort the loaded playlist and queue a range. All titles
+/// come from the public album currently on screen, never from an account.
+fn playlist() -> Vec<Step> {
+    let mut steps = ready();
+    steps.extend([
+        run("open a public album", |a| {
+            a.open(View::Page(Target::browse(super::E2E_ALBUM)))
+        }),
+        wait("album", 60.0, current_loaded),
+        run("choose the songs on screen", |a| {
+            let mut tracks: Vec<_> = page_items(a)
+                .into_iter()
+                .filter_map(|i| i.track.clone())
+                .collect();
+            set_fact(
+                "playlist_find",
+                tracks.first().map(|t| t.title.clone()).unwrap_or_default(),
+            );
+            tracks.sort_by_key(|t| t.duration.unwrap_or(u32::MAX));
+            if tracks.len() >= 3 {
+                set_fact("playlist_first", tracks[0].title.clone());
+                set_fact("playlist_third", tracks[2].title.clone());
+                a.backend.send(Command::Prepare(tracks[0].video_id.clone()));
+                set_fact("playlist_video", tracks[0].video_id.clone());
+            }
+        }),
+        wait("first song prepared", 90.0, |a| {
+            fact("playlist_video").is_some_and(|id| a.backend.prepared(&id))
+        }),
+        Step::Sleep(1.0),
+        cue("roll"),
+        Step::Sleep(1.0),
+        click("Find in playlist"),
+        Step::TypeWith(Box::new(|_| fact("playlist_find"))),
+        Step::Sleep(2.0),
+        Step::KeyWith(Modifiers::CTRL, Key::A),
+        Step::Key(Key::Backspace),
+        Step::Sleep(0.7),
+        click("Sort songs"),
+        Step::Sleep(0.5),
+        click("Duration"),
+        Step::Sleep(1.0),
+        Step::Key(Key::Escape),
+        Step::Hold(Modifiers::CTRL),
+        click_with("first visible song", |_| {
+            fact("playlist_first").map(|t| format!("Select {t}"))
+        }),
+        Step::Hold(Modifiers::SHIFT),
+        click_with("third visible song", |_| {
+            fact("playlist_third").map(|t| format!("Select {t}"))
+        }),
+        Step::Hold(Modifiers::NONE),
+        Step::Sleep(1.8),
+        click("Add to queue"),
+        wait("playing", 30.0, playing),
+        Step::Sleep(1.0),
+        click("Open player"),
+        wait("queue visible", 5.0, |a| {
+            a.now_playing && a.queue.len() == 3
+        }),
+        Step::Sleep(4.0),
+        Step::Leave,
+        Step::Sleep(0.8),
+        cue("cut"),
+        pause(),
+    ]);
+    steps
 }
 
 /// The song most clips play: it has timed lyrics and a most-replayed part.
@@ -146,6 +217,69 @@ fn home_card(app: &App, n: usize) -> Option<String> {
     let page = app.page_state(&View::Home.target())?.page.as_ref()?;
     let shelf = page.shelves.iter().find(|s| s.items.len() > n)?;
     shelf.items.get(n).map(|i| i.title.clone())
+}
+
+/// A song's cover flies into Now Playing, a click on the big cover pauses and
+/// plays, and a chip over Up next swaps in that mix of the song.
+fn radio() -> Vec<Step> {
+    let mut steps = find_song(SONG);
+    steps.splice(0..0, ready());
+    steps.extend([
+        Step::Leave,
+        Step::Sleep(2.0),
+        cue("roll"),
+        Step::Sleep(0.8),
+        play_song(),
+        wait("now playing", 10.0, |a| a.now_playing),
+        wait("playing", 30.0, playing),
+        wait("the song's mixes", 30.0, |a| {
+            a.playback.radio_chips.len() > 2
+        }),
+        Step::Sleep(1.5),
+        click("Now playing cover"),
+        wait("paused", 3.0, |a| !a.playback.playing),
+        Step::Sleep(1.4),
+        click("Now playing cover"),
+        wait("playing again", 5.0, |a| a.playback.playing),
+        Step::Sleep(1.4),
+        run("note what's next and pick two mixes in view", |a| {
+            set_fact("demo_next", up_next(a).unwrap_or_default());
+            let shown: Vec<&str> = a.playback.radio_chips[1..5.min(a.playback.radio_chips.len())]
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect();
+            let liked = ["Workout", "Party", "Pump-up", "Deep cuts", "Popular"];
+            let mut picks: Vec<&str> = Vec::new();
+            for label in liked.into_iter().chain(shown.iter().copied()) {
+                if shown.contains(&label) && !picks.contains(&label) {
+                    picks.push(label);
+                }
+            }
+            if let [first, second, ..] = picks.as_slice() {
+                set_fact("demo_mix", (*first).to_owned());
+                set_fact("demo_mix_2", (*second).to_owned());
+            }
+        }),
+        click_with("a mix of the song", |_| fact("demo_mix")),
+        wait("Up next is that mix", 30.0, |a| {
+            up_next(a) != fact("demo_next")
+        }),
+        Step::Sleep(2.2),
+        hover_with("another mix", |_| fact("demo_mix_2")),
+        Step::Sleep(0.6),
+        click_with("another mix", |_| fact("demo_mix_2")),
+        Step::Sleep(3.0),
+        Step::Leave,
+        Step::Sleep(1.0),
+        cue("cut"),
+        pause(),
+    ]);
+    steps
+}
+
+/// The song after the playing one.
+fn up_next(a: &App) -> Option<String> {
+    super::upcoming(a, 1).pop()
 }
 
 /// Most replayed and Stage: the ridge rises under the pointer, the cover

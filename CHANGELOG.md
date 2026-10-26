@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 — 2026-10-26
+
+Change type: feature
+
+- Find songs within loaded playlist rows and sort by title, artist or duration
+  without changing the saved playlist order.
+- Ctrl-click songs or Shift-click a range, then Play next, Add to queue or
+  Add to playlist together in the displayed order.
+- Render only visible playlist, library grid and queue rows.
+- Scale cover artwork off the UI thread and bound retained artwork memory.
+- Respect YouTube Music request throttling, including Retry-After, and retry
+  reads once without replaying account writes.
+- Navigate pages with Page Up, Page Down, Home and End.
+- Update fastframe, egui and winit together to the versions used by Spotifast.
+- Add repeatable signed-out playlist demos and E2E coverage for large lists,
+  selection, queue order and HTTP throttling.
+
 ## 0.2.0 — 2026-10-09
 
 Change type: feature

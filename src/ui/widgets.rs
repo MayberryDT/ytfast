@@ -236,8 +236,23 @@ pub(super) fn cover(
 /// use this same load result, so becoming ready cannot bypass the crop.
 pub(super) fn paint_cover(ui: &Ui, rect: Rect, image: egui::Image<'_>) {
     let rect = rect.round_to_pixels(ui.pixels_per_point());
-    match image.load_for_size(ui.ctx(), rect.size()) {
+    let scaled = image
+        .uri()
+        .filter(|uri| uri.starts_with("https://"))
+        .map(|uri| crate::covers::source(ui.ctx(), uri, rect.size()));
+    let uri = scaled.as_deref().or_else(|| image.uri());
+    let loaded = match &scaled {
+        Some(uri) => egui::Image::new(uri.as_str()).load_for_size(ui.ctx(), rect.size()),
+        None => image.load_for_size(ui.ctx(), rect.size()),
+    };
+    if let Some(uri) = uri {
+        crate::covers::touch(ui.ctx(), uri, rect.size());
+    }
+    match loaded {
         Ok(egui::load::TexturePoll::Ready { texture }) => {
+            if let Some(uri) = uri {
+                crate::covers::touch(ui.ctx(), uri, texture.size / ui.pixels_per_point());
+            }
             // Raster loaders retain the source aspect ratio; the UVs determine
             // which part of that source fills the destination rectangle.
             let mut options = image.image_options().clone();
@@ -334,4 +349,42 @@ pub(super) fn chip(ui: &mut Ui, text: &str, selected: bool, p: &Palette) -> egui
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, fg);
     named(response, text).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub(super) fn virtual_rows(
+    ui: &mut Ui,
+    count: usize,
+    row_height: f32,
+    mut row: impl FnMut(&mut Ui, usize),
+) {
+    if count == 0 {
+        return;
+    }
+    let previous_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let clip = ui.clip_rect();
+    let start_y = ui.cursor().top();
+    let width = ui.available_width();
+    // Retain a neighbour on either side so Tab can focus it and scroll it in.
+    let first = (((clip.top() - start_y) / row_height).floor().max(0.0) as usize)
+        .min(count)
+        .saturating_sub(1);
+    let last = (((clip.bottom() - start_y) / row_height).ceil().max(0.0) as usize)
+        .saturating_add(1)
+        .min(count);
+    #[cfg(feature = "e2e")]
+    crate::e2e::probe(
+        "virtual-rows",
+        serde_json::json!({"total":count,"first":first,"last":last,"built":last.saturating_sub(first)}),
+    );
+    if first > 0 {
+        ui.allocate_space(vec2(width, first as f32 * row_height));
+    }
+    for index in first..last {
+        row(ui, index);
+    }
+    if last < count {
+        ui.allocate_space(vec2(width, (count - last) as f32 * row_height));
+    }
+    ui.spacing_mut().item_spacing = previous_spacing;
 }

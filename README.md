@@ -35,6 +35,12 @@ The YouTube Music you know, with its own feel:
 - **Theme-painted covers**: an optional mode draws every cover in your Omarchy theme's colours.
 - **Things with weight**: cards lift, play turns into pause, carousels glide and settle on a card.
 
+Large playlists stay responsive by drawing the visible rows. Use **Find in playlist**
+and the order menu to search and sort loaded songs by title, artist or duration.
+Ctrl-click songs to select them, or Shift-click a range, then choose **Play next**,
+**Add to queue** or **Add to playlist**. Sorting changes the view, leaving the saved
+playlist order intact. **Page Up/Down**, **Home** and **End** navigate the main page.
+
 And everything you'd expect:
 
 - Home (with its moods), Explore, Library (with History), search with suggestions and recent searches, album, artist and playlist pages

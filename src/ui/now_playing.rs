@@ -233,13 +233,28 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
         .id_salt("up-next")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let mut rows: Vec<Rect> = Vec::with_capacity(app.queue.len());
+            let start = ui.cursor().min;
+            let width = ui.available_width();
+            let row_at = |i: usize| {
+                Rect::from_min_size(start + vec2(0.0, i as f32 * 56.0), vec2(width, 56.0))
+            };
+            if let Some(i) = current
+                && app.now_playing
+                && ui
+                    .ctx()
+                    .memory(|m| m.data.get_temp::<usize>(Id::new("up-next-scrolled")) != Some(i))
+            {
+                ui.scroll_to_rect(row_at(i), Some(Align::Center));
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(Id::new("up-next-scrolled"), i));
+            }
             let mut dragging = None;
             let mut dropped = None;
-            for (i, track) in app.queue.iter().enumerate() {
+            super::widgets::virtual_rows(ui, app.queue.len(), 56.0, |ui, i| {
+                let track = &app.queue[i];
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
-                rows.push(rect);
+
                 let is_current = current == Some(i);
                 let pointer_here = ui.rect_contains_pointer(rect);
                 let handle = Rect::from_min_size(rect.min, vec2(28.0, rect.height()));
@@ -259,16 +274,6 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 if is_current || held {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(6), p.surface_active);
-                    if is_current
-                        && app.now_playing
-                        && ui.ctx().memory(|m| {
-                            m.data.get_temp::<usize>(Id::new("up-next-scrolled")) != Some(i)
-                        })
-                    {
-                        ui.scroll_to_rect(rect, Some(Align::Center));
-                        ui.ctx()
-                            .memory_mut(|m| m.data.insert_temp(Id::new("up-next-scrolled"), i));
-                    }
                 } else if pointer_here {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(6), p.surface_hover);
@@ -373,7 +378,7 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 {
                     actions.push(Action::Command(Command::JumpTo(i)));
                 }
-            }
+            });
             // A row being dragged: a line shows where it will land.
             let Some(from) = dragging.or(dropped) else {
                 return;
@@ -381,10 +386,8 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
             let Some(pointer) = ui.ctx().pointer_latest_pos() else {
                 return;
             };
-            let gap = rows
-                .iter()
-                .position(|r| pointer.y < r.center().y)
-                .unwrap_or(rows.len());
+            let gap = (((pointer.y - start.y) / 56.0 + 0.5).floor().max(0.0) as usize)
+                .min(app.queue.len());
             if dropped.is_some() {
                 let to = if gap > from { gap - 1 } else { gap };
                 if to != from {
@@ -392,12 +395,9 @@ fn up_next(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
                 }
                 return;
             }
-            let y = match rows.get(gap) {
-                Some(row) => row.top(),
-                None => rows.last().map_or(pointer.y, |r| r.bottom()),
-            };
+            let y = start.y + gap as f32 * 56.0;
             if gap != from && gap != from + 1 {
-                let width = rows.first().map_or(0.0..=0.0, |r| r.left()..=r.right());
+                let width = start.x..=start.x + width;
                 ui.painter().hline(width, y, Stroke::new(2.0, p.accent));
             }
             // Near the edges, the list scrolls to reach further rows.

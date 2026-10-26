@@ -91,3 +91,11 @@ writes or installation; CLI/linkage smoke does not replace native acceptance.
 
 - The OptiPlex's ibara display runs at 30 Hz; set it to 60 for recording (`hyprctl eval 'hl.monitor({ output = "IbaraVirtual", mode = "1920x1080@60", position = "0x0", scale = 1 })'`) and back to 30 afterwards.
 - `themes` switches the desktop's theme through the installed ones and back.
+
+## Library and transport improvements (2026-10-26)
+
+- Framework pins match Spotifast v0.14.2: fastframe v0.14.0, egui 0.36.2 fork 6ce633ba, winit fork 0bed9dc0. Existing shell, fonts, theme and icon APIs remain compatible.
+- List view filtering, sorting and selection live in egui view state. Source playlist order and setVideoId identities stay intact; bulk actions use the displayed order. Filters explicitly cover loaded songs, with continuation loading on scroll. Lists and Up next build visible rows plus a neighbour for focus. Page Up/Down and Home/End move the main page; text fields keep those keys.
+- Covers decode off the UI thread into 32-pixel size buckets (maximum 2048 px), shared by ordinary cover drawing and flights. A 64 MiB estimated texture budget evicts oldest nonvisible artwork, preserving the current frame; encoded source bytes have a separate 16 MiB ceiling. This is artwork only, never an audio cache.
+- InnerTube requests have four concurrent slots and a shared HTTP 429 cooldown. Both seconds and HTTP-date Retry-After forms are accepted. Reads retry once; writes never replay automatically. Cooldowns longer than one minute return the plain busy message immediately while preserving the server deadline for later requests.
+- `scripts/e2e.sh library` runs signed out with a 10000-entry list made from public metadata, drives filtering, sorting, range selection and bulk queue input, and saves screenshots and summary.json. `YTFAST_E2E_BINARY` runs a prebuilt binary without building on the desktop host. `CARGO_TARGET_DIR` is respected for ordinary builds.

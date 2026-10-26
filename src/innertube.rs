@@ -5,7 +5,7 @@
 //! same requests browse the public catalogue.
 
 use std::sync::RwLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use sha1::Digest;
@@ -25,6 +25,7 @@ pub enum ApiError {
     /// YouTube rejected the session.
     Auth,
     Http(u16),
+    Throttled,
     Invalid(String),
 }
 
@@ -33,6 +34,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Offline(detail) => write!(f, "Can't reach YouTube Music ({detail})"),
             ApiError::Auth => f.write_str("YouTube Music didn't accept the session"),
+            ApiError::Throttled => f.write_str("YouTube Music is busy. Try again in a moment."),
             ApiError::Http(code) => write!(f, "YouTube Music answered with an error (HTTP {code})"),
             ApiError::Invalid(detail) => {
                 write!(f, "Unexpected answer from YouTube Music ({detail})")
@@ -58,6 +60,8 @@ pub struct Stream {
 pub struct Client {
     http: reqwest::Client,
     session: RwLock<Option<Session>>,
+    requests: tokio::sync::Semaphore,
+    cooldown: tokio::sync::Mutex<Instant>,
 }
 
 impl Default for Client {
@@ -78,6 +82,8 @@ impl Client {
         Self {
             http,
             session: RwLock::new(None),
+            requests: tokio::sync::Semaphore::new(4),
+            cooldown: tokio::sync::Mutex::new(Instant::now()),
         }
     }
 
@@ -114,11 +120,49 @@ impl Client {
     }
 
     async fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
+        let result = self.call_once(endpoint, body.clone()).await;
+        if matches!(result, Err(ApiError::Throttled))
+            && matches!(
+                endpoint,
+                "browse" | "next" | "search" | "player" | "account/account_menu"
+            )
+        {
+            return self.call_once(endpoint, body).await;
+        }
+        result
+    }
+
+    async fn call_once(&self, endpoint: &str, body: Value) -> Result<Value> {
+        let _permit = self
+            .requests
+            .acquire()
+            .await
+            .expect("request limiter stays open");
+        // Recheck after every wait: another request may have extended it.
+        loop {
+            let until = *self.cooldown.lock().await;
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if remaining > Duration::from_secs(60) {
+                return Err(ApiError::Throttled);
+            }
+            tokio::time::sleep(remaining).await;
+        }
         let mut body = body;
         body["context"] = json!({"client": {"clientName": "WEB_REMIX", "clientVersion": CLIENT_VERSION, "hl": "en", "gl": "US"}});
+        #[cfg(feature = "e2e")]
+        let test_origin = std::env::var("YTFAST_E2E_API_ORIGIN")
+            .ok()
+            .filter(|url| !self.signed_in() && url.starts_with("http://127.0.0.1:"));
+        #[cfg(feature = "e2e")]
+        let origin = test_origin.as_deref().unwrap_or(ORIGIN);
+        #[cfg(not(feature = "e2e"))]
+        let origin = ORIGIN;
         let request = self
             .http
-            .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
+            .post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("Content-Type", "application/json")
             .header("Origin", ORIGIN)
             .header("X-Origin", ORIGIN)
@@ -129,6 +173,25 @@ impl Client {
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(ApiError::Auth);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let wait = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| {
+                    h.parse::<u64>().ok().or_else(|| {
+                        httpdate::parse_http_date(h).ok().map(|at| {
+                            at.duration_since(SystemTime::now())
+                                .unwrap_or_default()
+                                .as_secs()
+                        })
+                    })
+                })
+                .unwrap_or(30);
+            let mut until = self.cooldown.lock().await;
+            *until = (*until).max(Instant::now() + Duration::from_secs(wait.min(86400)));
+            return Err(ApiError::Throttled);
         }
         if !status.is_success() {
             return Err(ApiError::Http(status.as_u16()));

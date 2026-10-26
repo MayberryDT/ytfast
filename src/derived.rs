@@ -377,7 +377,7 @@ pub fn cover_source<'a>(ctx: &Context, url: &'a str, size: Vec2) -> Cow<'a, str>
         (s.key.clone(), previous)
     });
     let Some(key) = key else {
-        return Cow::Borrowed(url);
+        return Cow::Owned(crate::covers::source(ctx, url, size));
     };
     let uri = paint_uri(&key, url);
     let ready = matches!(
@@ -404,6 +404,6 @@ pub fn cover_source<'a>(ctx: &Context, url: &'a str, size: Vec2) -> Cow<'a, str>
     match (ready, previous) {
         (true, _) => Cow::Owned(uri),
         (false, Some(old)) => Cow::Owned(paint_uri(&old, url)),
-        (false, None) => Cow::Borrowed(url),
+        (false, None) => Cow::Owned(crate::covers::source(ctx, url, size)),
     }
 }

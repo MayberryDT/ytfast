@@ -2,9 +2,9 @@
 # Short videos of Music for showing people, recorded from the real app on this
 # machine's desktop:
 #
-#   scripts/demo.sh [flight|stage|themes|audition|mix|keys|sound ...]
+#   scripts/demo.sh [flight|stage|themes|audition|mix|keys|sound|radio|playlist ...]
 #
-#   flight    covers fly: Home's cards, a search, the song to the player, Now
+#   flight    covers fly: Home's cards, a search, the song into Now
 #             Playing, the jump to the most replayed part, timed lyrics
 #   stage     the most-replayed ridge, Stage with big timed lyrics, and back
 #   themes    Omarchy themes switched live, then covers painted in the theme
@@ -13,6 +13,10 @@
 #   keys      Play anything (Ctrl+K), the shortcuts, Play next, Add to queue,
 #             Up next reordered by dragging
 #   sound     equalizer presets, the sleep timer
+#   radio     a song flies into Now Playing, the big cover pauses and plays,
+#             mixes of the song (Workout, Pump-up) swap in over Up next
+#
+#   playlist  find a song, sort a playlist and queue a selected range
 #
 # With no arguments it records them all. Each runs signed out (an empty
 # stand-in home with the desktop's Omarchy theme linked in), so nothing from an
@@ -23,13 +27,15 @@
 # and back.
 set -eu
 cd "$(dirname "$0")/.."
-clips="${*:-flight stage themes audition mix keys sound}"
+clips="${*:-flight stage themes audition mix keys sound radio playlist}"
 out="$PWD/artifacts/demo/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$out"
 
+if [ -z "${YTFAST_DEMO_BINARY:-}" ]; then
 systemd-run --user --wait --collect --pipe -q -p MemoryHigh=4500M -p MemoryMax=5G \
 	--working-directory="$PWD" -- cargo build --release -j 4 --features e2e >"$out/build.txt" 2>&1 ||
 	{ tail -40 "$out/build.txt"; exit 1; }
+fi
 
 systemctl --user stop ytfast-app 2>/dev/null || true
 pkill -x ytfast 2>/dev/null && sleep 1 || true
@@ -60,7 +66,7 @@ for clip in $clips; do
 		-E YTFAST_E2E_REFRESH_HZ="$refresh" -E HOME="$fake" -E XDG_CONFIG_HOME="$fake/.config" \
 		-E XDG_CACHE_HOME="$fake/.cache" -E XDG_STATE_HOME="$fake/.local/state" \
 		-E XDG_DATA_HOME="$fake/.local/share" -E YTFAST_E2E_REAL_HOME="$HOME" \
-		-- "$PWD/target/release/ytfast" || true
+		-- "${YTFAST_DEMO_BINARY:-${CARGO_TARGET_DIR:-$PWD/target}/release/ytfast}" || true
 	systemctl --user kill -s INT "$recorder" 2>/dev/null || true
 	while systemctl --user is-active -q "$recorder"; do sleep 0.2; done
 	cp "$fake/.cache/ytfast/ytfast.log" "$dir/app.log" 2>/dev/null || true

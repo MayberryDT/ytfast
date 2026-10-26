@@ -241,6 +241,7 @@ fn scenario(name: &str) -> Vec<Step> {
         "offline" => no_connection(),
         "theme" => theme(),
         "showcase" => showcase(),
+        "library" => library(),
         "motion" => motion(),
         "pages" => pages(),
         "desktop" => desktop(),
@@ -584,6 +585,123 @@ fn theme() -> Vec<Step> {
 /// directory (scripts/e2e.sh), so ytfast is signed out and shows public
 /// YouTube Music. Home, a search, an artist, an album playing, Now Playing,
 /// and the same album in a light theme (switched back afterwards).
+// A real window and backend, with a large deterministic public-data list.
+// No account writes or real account data; actions still travel through input.
+fn library() -> Vec<Step> {
+    vec![
+        wait("public home loaded", 60.0, current_loaded),
+        run("open a public album", |a| {
+            a.open(View::Page(Target::browse(E2E_ALBUM)));
+        }),
+        wait("album loaded", 60.0, current_loaded),
+        run("populate 10000 list entries", |a| {
+            let state = a.pages.get_mut(&a.view.target().key()).expect("page");
+            let page = state.page.as_mut().expect("album");
+            let template = page
+                .shelves
+                .iter()
+                .flat_map(|s| &s.items)
+                .find(|i| i.track.is_some())
+                .expect("song")
+                .clone();
+            let items = (0..10000)
+                .map(|i| {
+                    let mut item = template.clone();
+                    item.title = format!("Test song {i:05}");
+                    item.index = Some((i + 1).to_string());
+                    let t = item.track.as_mut().expect("track");
+                    t.title = item.title.clone();
+                    t.set_video_id = Some(format!("entry-{i}"));
+                    t.duration = Some(10000 - i);
+                    item
+                })
+                .collect();
+            page.header = None;
+            page.shelves = vec![crate::model::Shelf {
+                title: "Large playlist".into(),
+                strapline: None,
+                style: crate::model::ShelfStyle::List,
+                items,
+                more: None,
+                continuation: None,
+            }];
+            page.continuation = None;
+        }),
+        Step::Sleep(1.0),
+        wait("only visible rows built", 5.0, |_| {
+            probed("virtual-rows")["total"] == 10000
+                && probed("virtual-rows")["built"]
+                    .as_u64()
+                    .is_some_and(|n| n < 100)
+        }),
+        measure(
+            "large_list",
+            |_| json!({"view":probed("list-view"),"rendering":probed("virtual-rows")}),
+        ),
+        Step::Screenshot("library-10000"),
+        click("Find in playlist"),
+        Step::Type("Test song 0000".into()),
+        wait("ten filtered matches", 5.0, |_| {
+            probed("list-view")["count"] == 10
+        }),
+        click("Sort songs"),
+        click("Duration"),
+        wait("duration sorted descending titles", 5.0, |_| {
+            probed("list-view")["first"] == "Test song 00009"
+        }),
+        Step::Key(egui::Key::Escape),
+        Step::Hold(egui::Modifiers::CTRL),
+        click("Select Test song 00009"),
+        Step::Hold(egui::Modifiers::SHIFT),
+        click("Select Test song 00007"),
+        Step::Hold(egui::Modifiers::NONE),
+        wait("three songs selected without playing", 5.0, |a| {
+            probed("list-view")["selected"] == 3 && !a.playback.playing
+        }),
+        Step::Screenshot("library-selection"),
+        click("Add to queue"),
+        wait("bulk queue follows displayed order", 10.0, |a| {
+            a.queue.len() >= 3
+                && a.queue
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .map(|t| t.title.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["Test song 00007", "Test song 00008", "Test song 00009"]
+        }),
+        measure("bulk_queue", |a| {
+            json!(a.queue.iter().map(|t| &t.title).collect::<Vec<_>>())
+        }),
+        click("Clear selection"),
+        click("Find in playlist"),
+        Step::KeyWith(egui::Modifiers::CTRL, egui::Key::A),
+        Step::Type("".into()),
+        Step::Key(egui::Key::Backspace),
+        wait("filter cleared", 5.0, |_| {
+            probed("list-view")["count"] == 10000
+        }),
+        Step::Key(egui::Key::Escape),
+        Step::Key(egui::Key::End),
+        Step::Sleep(0.5),
+        wait("End reaches final row", 5.0, |_| {
+            probed("virtual-rows")["last"] == 10000
+                && probed("virtual-rows")["built"]
+                    .as_u64()
+                    .is_some_and(|n| n > 5)
+        }),
+        measure("end_rendering", |_| probed("virtual-rows")),
+        Step::Screenshot("library-end"),
+        Step::Key(egui::Key::Home),
+        Step::Sleep(0.5),
+        wait("Home returns to first row", 5.0, |_| {
+            probed("virtual-rows")["first"] == 0
+        }),
+        measure("home_rendering", |_| probed("virtual-rows")),
+        Step::Screenshot("library-home"),
+    ]
+}
+
 fn showcase() -> Vec<Step> {
     let home = View::Home.target();
     let original = omarchy_theme().unwrap_or_else(|| "Stakeout".into());
@@ -4961,6 +5079,7 @@ pub struct Driver {
     started: Instant,
     log: std::fs::File,
     pending: Vec<Event>,
+    held_modifiers: egui::Modifiers,
     phase: Phase,
     screenshot_requested: bool,
     measurements: BTreeMap<String, Value>,
@@ -4997,6 +5116,7 @@ impl Driver {
             started: Instant::now(),
             log,
             pending: Vec::new(),
+            held_modifiers: egui::Modifiers::NONE,
             phase: Phase::Idle,
             screenshot_requested: false,
             measurements: BTreeMap::new(),
@@ -5039,6 +5159,8 @@ impl Driver {
 
     /// Feeds the synthetic input for this frame.
     pub fn inject(&mut self, raw: &mut egui::RawInput) {
+        raw.events
+            .push(Event::ModifiersChanged(self.held_modifiers));
         raw.events.append(&mut self.pending);
     }
 
@@ -5286,7 +5408,7 @@ impl Driver {
                         pos,
                         button: *button,
                         pressed: true,
-                        modifiers: Default::default(),
+                        modifiers: self.held_modifiers,
                     });
                     self.pressed = Some((pos, Instant::now()));
                     self.phase = Phase::Press(pos);
@@ -5296,7 +5418,7 @@ impl Driver {
                         pos,
                         button: *button,
                         pressed: false,
-                        modifiers: Default::default(),
+                        modifiers: self.held_modifiers,
                     });
                     self.phase = Phase::Release;
                 }
@@ -5344,7 +5466,7 @@ impl Driver {
                         physical_key: None,
                         pressed,
                         repeat: false,
-                        modifiers: Default::default(),
+                        modifiers: self.held_modifiers,
                     });
                 }
                 self.note(&format!("key {key:?}"));
@@ -5352,7 +5474,10 @@ impl Driver {
                 self.advance();
             }
             Step::Hold(modifiers) => {
-                self.pending.push(Event::ModifiersChanged(*modifiers));
+                self.held_modifiers = *modifiers;
+                self.held_modifiers.command |= self.held_modifiers.ctrl;
+                self.pending
+                    .push(Event::ModifiersChanged(self.held_modifiers));
                 self.note(&format!("hold {modifiers:?}"));
                 if modifiers.any() {
                     self.show_keys(*modifiers, None);
@@ -5362,7 +5487,9 @@ impl Driver {
                 self.advance();
             }
             Step::KeyWith(modifiers, key) => {
-                let (modifiers, key) = (*modifiers, *key);
+                let (mut modifiers, key) = (*modifiers, *key);
+                modifiers.command |= modifiers.ctrl;
+                self.pending.push(Event::ModifiersChanged(modifiers));
                 for pressed in [true, false] {
                     self.pending.push(Event::Key {
                         key,
@@ -5502,11 +5629,12 @@ impl Driver {
                 // presenting), rest on the target, release.
                 Some((start, end, frame)) => {
                     let moves: u32 = if self.presenting { 40 } else { 10 };
+                    let held_modifiers = self.held_modifiers;
                     let button = |pos, pressed| Event::PointerButton {
                         pos,
                         button: egui::PointerButton::Primary,
                         pressed,
-                        modifiers: Default::default(),
+                        modifiers: held_modifiers,
                     };
                     match frame {
                         0 => {

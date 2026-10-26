@@ -7,6 +7,7 @@ pub(crate) mod audition;
 mod chrome;
 mod equalizer;
 mod keys;
+mod lists;
 mod lyrics;
 mod menu;
 pub mod mini;

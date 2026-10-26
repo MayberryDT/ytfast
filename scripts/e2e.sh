@@ -50,11 +50,14 @@ scenario="${1:-journey}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$scenario"
 dir="$PWD/artifacts/e2e/$stamp"
 mkdir -p "$dir"
-commit="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- src Cargo.toml || echo -dirty)"
+commit="$(git rev-parse --short HEAD 2>/dev/null || printf source)"
+if [ "$commit" != source ] && ! git diff --quiet HEAD -- src Cargo.toml; then commit="$commit-dirty"; fi
 
+if [ -z "${YTFAST_E2E_BINARY:-}" ]; then
 systemd-run --user --wait --collect --pipe -q -p MemoryHigh=5G -p MemoryMax=6G \
 	--working-directory="$PWD" -E YTFAST_COMMIT="$commit" -- cargo build -j 4 --features e2e >"$dir/build.txt" 2>&1 ||
 	{ tail -40 "$dir/build.txt"; exit 1; }
+fi
 
 # One instance at a time: a running ytfast would just be asked to show itself.
 systemctl --user stop ytfast-app 2>/dev/null || true
@@ -67,6 +70,11 @@ pkill -x ytfast 2>/dev/null && sleep 1 || true
 export HYPRLAND_INSTANCE_SIGNATURE
 refresh="$(hyprctl monitors -j 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["refreshRate"])' 2>/dev/null || echo 60)"
 set -- -E YTFAST_E2E_DIR="$dir" -E YTFAST_E2E_SCENARIO="$scenario" -E RUST_LOG=ytfast=debug,warn -E YTFAST_E2E_REFRESH_HZ="$refresh"
+if [ -n "${OMARCHY_PATH:-}" ]; then set -- "$@" -E OMARCHY_PATH="$OMARCHY_PATH"; fi
+if [ -n "${YTFAST_E2E_LIGHT_THEME:-}" ]; then set -- "$@" -E YTFAST_E2E_LIGHT_THEME="$YTFAST_E2E_LIGHT_THEME"; fi
+if [ -n "${YTFAST_E2E_API_ORIGIN:-}" ]; then
+    set -- "$@" -E YTFAST_E2E_API_ORIGIN="$YTFAST_E2E_API_ORIGIN"
+fi
 log="${XDG_CACHE_HOME:-$HOME/.cache}/ytfast/ytfast.log"
 case "$scenario" in
 recovery)
@@ -98,7 +106,7 @@ offline)
 	# Every request goes to a proxy that isn't there.
 	set -- "$@" -E HTTPS_PROXY=http://127.0.0.1:9 -E HTTP_PROXY=http://127.0.0.1:9 -E ALL_PROXY=http://127.0.0.1:9
 	;;
-showcase)
+showcase|library)
 	# No browser profiles at all: ytfast stays signed out. The desktop's
 	# Omarchy theme is linked in so the colours are the real ones.
 	fake="$dir/home"
@@ -112,7 +120,14 @@ showcase)
 esac
 
 # The user manager has the desktop session's environment (Wayland, D-Bus).
-systemd-run --user --wait --collect -q --unit="ytfast-e2e-$stamp" -p RuntimeMaxSec=1200 "$@" -- "$PWD/target/debug/ytfast" || true
+systemd-run --user --wait --collect -q --unit="ytfast-e2e-$stamp" -p RuntimeMaxSec=1200 "$@" -- "${YTFAST_E2E_BINARY:-${CARGO_TARGET_DIR:-$PWD/target}/debug/ytfast}" || true
 cp "$log" "$dir/app.log" 2>/dev/null || true
 echo "artifacts: $dir"
 cat "$dir/summary.json"
+
+python3 - "$dir/summary.json" <<'CHECK'
+import json, sys
+with open(sys.argv[1]) as summary:
+    passed = json.load(summary).get("passed") is True
+sys.exit(0 if passed else 1)
+CHECK

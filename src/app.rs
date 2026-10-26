@@ -371,6 +371,9 @@ impl App {
         ctx.add_image_loader(Arc::new(crate::derived::Loader::new(
             self.backend.runtime.clone(),
         )));
+        ctx.add_image_loader(Arc::new(crate::covers::ScaledLoader::new(
+            self.backend.runtime.clone(),
+        )));
         ctx.options_mut(|o| o.reduce_texture_memory = true);
         crate::theme::apply(ctx, &self.palette);
         self.applied = Some(self.palette.clone());
@@ -1182,6 +1185,7 @@ impl App {
             WindowKind::Main => crate::ui::draw(self, ui, &mut actions),
             WindowKind::Mini => crate::ui::mini::draw(self, ui, &mut actions),
         }
+        crate::covers::finish_frame(&ctx);
         for action in actions {
             self.apply(&ctx, action);
         }

@@ -151,17 +151,29 @@ pub(super) fn shelf_view(
             glide(ui, scroll_id, &out, 380.0 + 24.0);
         }
         ShelfStyle::List => {
-            for item in &shelf.items {
-                row(ui, item, shelf, true, p, actions);
-            }
+            super::lists::show(ui, shelf, id, p, actions);
         }
         ShelfStyle::Grid => {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(GAP, 24.0);
-                for item in &shelf.items {
-                    card(ui, item, shelf, p, actions);
-                }
-            });
+            let columns = ((ui.available_width() + GAP) / (CARD + GAP))
+                .floor()
+                .max(1.0) as usize;
+            super::widgets::virtual_rows(
+                ui,
+                shelf.items.len().div_ceil(columns),
+                CARD + 58.0 + 24.0,
+                |ui, row| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        let first = row * columns;
+                        for index in first..(first + columns).min(shelf.items.len()) {
+                            ui.push_id((id, index), |ui| {
+                                card(ui, &shelf.items[index], shelf, p, actions)
+                            });
+                        }
+                    });
+                    ui.add_space(24.0);
+                },
+            );
         }
         ShelfStyle::Buttons => {
             ui.horizontal_wrapped(|ui| {
@@ -369,7 +381,10 @@ pub(super) fn row(
         vec2(ui.available_width(), height),
         super::account::row_sense(ui, item),
     );
-    if response.hovered() {
+    if super::lists::selected(ui, item) {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), p.surface_active);
+    } else if response.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), p.surface_hover);
     }
@@ -383,6 +398,7 @@ pub(super) fn row(
     #[cfg(feature = "e2e")]
     if item.track.is_some() {
         crate::e2e::register(ui.ctx(), &format!("Play {}", item.title), thumb);
+        crate::e2e::register(ui.ctx(), &format!("Select {}", item.title), thumb);
     }
     if show_index {
         ui.painter().text(
@@ -504,9 +520,11 @@ pub(super) fn row(
     if let Some(track) = &item.track {
         super::audition::hook(ui, &response, track, thumb, false, p, actions);
     }
+    let picked = super::lists::pick(ui, item, &response);
     if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
+        && !picked
     {
         // A song's cover flies from its row to Now Playing.
         let thumb = Rect::from_min_size(
