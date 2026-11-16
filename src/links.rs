@@ -60,6 +60,13 @@ pub fn target_from_link(link: &str) -> Option<Target> {
             })
         }
         ("playlist", None, _) => Some(Target::browse(format!("VL{}", id(param("list"))?))),
+        ("podcast", Some(show_id), None) if is_id(show_id) => {
+            Some(Target::browse(if show_id.starts_with("MPSP") {
+                show_id.to_owned()
+            } else {
+                format!("MPSP{show_id}")
+            }))
+        }
         ("browse" | "channel", Some(browse_id), None) if is_id(browse_id) => {
             Some(Target::browse(browse_id))
         }

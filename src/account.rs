@@ -909,7 +909,11 @@ impl App {
                     Mark::Saved(!save),
                     Mark::Saved(save),
                     Edit::Save { playlist_id, save },
-                    vec![LibraryTab::Albums.target(), LibraryTab::Playlists.target()],
+                    vec![
+                        LibraryTab::Albums.target(),
+                        LibraryTab::Playlists.target(),
+                        LibraryTab::Podcasts.target(),
+                    ],
                     failed,
                 );
             }
