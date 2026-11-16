@@ -159,6 +159,14 @@ pub struct Subscription {
     pub subscribed: bool,
 }
 
+/// One option inside a dropdown chip (e.g. podcast episode sort order).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChipOption {
+    pub text: String,
+    pub selected: bool,
+    pub reload: String,
+}
+
 /// A filter chip above a page (search types, library sections, home moods).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chip {
@@ -172,6 +180,13 @@ pub struct Chip {
     /// discography: Albums, Singles & EPs): the continuation to load.
     #[serde(default)]
     pub reload: Option<String>,
+    /// Reload continuation when choosing a selected reload chip again
+    /// (podcast filter chips).
+    #[serde(default)]
+    pub deselect_reload: Option<String>,
+    /// Menu options when the chip opens a popup (podcast sort order).
+    #[serde(default)]
+    pub menu: Vec<ChipOption>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -374,13 +389,35 @@ impl Default for Mixes {
     }
 }
 
-/// Parses "3:45" or "1:02:03" into seconds.
+/// Parses "3:45", "1:02:03", or "2 hr 45 min" / "6 min 18 sec" into seconds.
 pub fn parse_duration(text: &str) -> Option<u32> {
-    let mut total = 0u32;
-    for part in text.trim().split(':') {
-        total = total.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+    let trimmed = text.trim().trim_start_matches('•').trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    Some(total)
+    if trimmed.contains(':') {
+        let mut total = 0u32;
+        for part in trimmed.split(':') {
+            total = total.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+        }
+        return Some(total);
+    }
+    let mut tokens = trimmed.split_whitespace();
+    let mut total = 0u32;
+    let mut any = false;
+    while let Some(num) = tokens.next() {
+        let n: u32 = num.parse().ok()?;
+        let unit = tokens.next()?;
+        let mult = match unit {
+            "hr" | "hrs" | "hour" | "hours" => 3600,
+            "min" | "mins" | "minute" | "minutes" => 60,
+            "sec" | "secs" | "second" | "seconds" => 1,
+            _ => return None,
+        };
+        total = total.checked_add(n.checked_mul(mult)?)?;
+        any = true;
+    }
+    any.then_some(total)
 }
 
 pub fn format_time(seconds: f64) -> String {
