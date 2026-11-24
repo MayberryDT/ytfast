@@ -8,8 +8,8 @@
 use serde_json::Value;
 
 use crate::model::{
-    Chip, Header, Item, ItemKind, Lyrics, Page, RadioChip, Run, Shelf, ShelfStyle, Target, Track,
-    WatchNext, parse_duration,
+    Chip, ChipOption, Header, Item, ItemKind, Lyrics, Page, RadioChip, Run, Shelf, ShelfStyle,
+    Target, Track, WatchNext, parse_duration,
 };
 
 /// Follows object keys; a key that parses as a number indexes an array.
@@ -147,7 +147,9 @@ fn kind_of(ep: Option<&Value>) -> ItemKind {
     let Some(ep) = ep else { return ItemKind::Other };
     if ep.get("watchEndpoint").is_some() {
         return match video_type(ep) {
-            Some("MUSIC_VIDEO_TYPE_ATV") | None => ItemKind::Song,
+            Some("MUSIC_VIDEO_TYPE_ATV" | "MUSIC_VIDEO_TYPE_PODCAST_EPISODE") | None => {
+                ItemKind::Song
+            }
             _ => ItemKind::Video,
         };
     }
@@ -161,7 +163,9 @@ fn kind_of(ep: Option<&Value>) -> ItemKind {
             | "MUSIC_PAGE_TYPE_USER_CHANNEL"
             | "MUSIC_PAGE_TYPE_LIBRARY_ARTIST",
         ) => ItemKind::Artist,
-        Some("MUSIC_PAGE_TYPE_PLAYLIST") => ItemKind::Playlist,
+        Some("MUSIC_PAGE_TYPE_PLAYLIST" | "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE") => {
+            ItemKind::Playlist
+        }
         _ => ItemKind::Other,
     }
 }
@@ -209,6 +213,10 @@ fn is_artist_id(t: &Option<Target>) -> bool {
     matches!(t, Some(Target::Browse { id, .. }) if id.starts_with("UC"))
 }
 
+fn is_show_id(t: &Option<Target>) -> bool {
+    matches!(t, Some(Target::Browse { id, .. }) if id.starts_with("MPSP"))
+}
+
 fn is_album_id(t: &Option<Target>) -> bool {
     matches!(t, Some(Target::Browse { id, .. }) if id.starts_with("MPRE"))
 }
@@ -225,6 +233,14 @@ fn artists_and_album(subtitle: &[Run]) -> (Vec<Run>, Option<Run>) {
         .collect();
     if let (Some(&first), Some(&last)) = (linked.first(), linked.last()) {
         return (subtitle[first..=last].to_vec(), album);
+    }
+    let shows: Vec<Run> = subtitle
+        .iter()
+        .filter(|r| is_show_id(&r.target))
+        .cloned()
+        .collect();
+    if !shows.is_empty() {
+        return (shows, album);
     }
     let joined: String = subtitle.iter().map(|r| r.text.as_str()).collect();
     let artist = joined
@@ -366,7 +382,9 @@ fn list_row(r: &Value) -> Option<Item> {
                 .and_then(|o| find(o, "musicVideoType"))
                 .and_then(Value::as_str)
         }) {
-            Some("MUSIC_VIDEO_TYPE_ATV") | None => ItemKind::Song,
+            Some("MUSIC_VIDEO_TYPE_ATV" | "MUSIC_VIDEO_TYPE_PODCAST_EPISODE") | None => {
+                ItemKind::Song
+            }
             _ => ItemKind::Video,
         };
         let duration = fixed.as_deref().and_then(parse_duration);
@@ -409,6 +427,98 @@ fn list_row(r: &Value) -> Option<Item> {
     })
 }
 
+/// `musicMultiRowListItemRenderer`: a podcast episode row/card.
+fn multi_row(r: &Value) -> Option<Item> {
+    let title = text(r.get("title"));
+    if title.is_empty() {
+        return None;
+    }
+    let title_nav = at(r, &["title", "runs", "0", "navigationEndpoint"]);
+    let play = play_button(r);
+    let on_tap = r.get("onTap").and_then(endpoint);
+    let watch = match (&on_tap, &play) {
+        (
+            Some(
+                t @ Target::Watch {
+                    video_id: Some(_), ..
+                },
+            ),
+            _,
+        ) => Some(t.clone()),
+        (
+            _,
+            Some(
+                t @ Target::Watch {
+                    video_id: Some(_), ..
+                },
+            ),
+        ) => Some(t.clone()),
+        _ => None,
+    };
+    let thumb = thumbnail(r.get("thumbnail"));
+    let second_title = runs(r.get("secondTitle"));
+    let sub_runs = runs(r.get("subtitle"));
+    let mut subtitle = second_title.clone();
+    if !sub_runs.is_empty() {
+        if !subtitle.is_empty() {
+            subtitle.push(Run {
+                text: " • ".into(),
+                target: None,
+            });
+        }
+        subtitle.extend(sub_runs);
+    }
+    let progress = at(r, &["playbackProgress", "musicPlaybackProgressRenderer"]);
+    let duration = progress.and_then(|p| {
+        let dur = text(p.get("durationText"));
+        parse_duration(&dur).or_else(|| {
+            let prog = text(p.get("playbackProgressText"));
+            (!prog.contains("left"))
+                .then(|| parse_duration(&prog))
+                .flatten()
+        })
+    });
+    if let Some(Target::Watch {
+        video_id: Some(id), ..
+    }) = &watch
+    {
+        let track = Track {
+            video_id: id.clone(),
+            title: title.clone(),
+            artists: second_title,
+            album: None,
+            thumbnail: thumb.clone(),
+            duration,
+            like: None,
+            set_video_id: None,
+        };
+        return Some(Item {
+            kind: ItemKind::Song,
+            title,
+            subtitle,
+            thumbnail: thumb,
+            target: watch,
+            play,
+            track: Some(track),
+            index: None,
+            stripe: None,
+            editable: None,
+        });
+    }
+    Some(Item {
+        kind: kind_of(title_nav),
+        title,
+        subtitle,
+        thumbnail: thumb,
+        target: title_nav.and_then(endpoint),
+        play,
+        track: None,
+        index: None,
+        stripe: None,
+        editable: None,
+    })
+}
+
 /// `musicNavigationButtonRenderer`: a mood/genre or Explore button.
 fn nav_button(r: &Value) -> Option<Item> {
     Some(Item {
@@ -433,6 +543,9 @@ fn item(v: &Value) -> Option<Item> {
     }
     if let Some(r) = v.get("musicResponsiveListItemRenderer") {
         return list_row(r);
+    }
+    if let Some(r) = v.get("musicMultiRowListItemRenderer") {
+        return multi_row(r);
     }
     if let Some(r) = v.get("musicNavigationButtonRenderer") {
         return nav_button(r);
@@ -485,9 +598,10 @@ fn section(v: &Value, page: &mut Page) -> Vec<Shelf> {
                 .or_else(|| h.get("musicImmersiveCarouselShelfBasicHeaderRenderer"))
         });
         let raw = array(r.get("contents"));
-        let rows_raw = raw
-            .iter()
-            .any(|i| i.get("musicResponsiveListItemRenderer").is_some());
+        let rows_raw = raw.iter().any(|i| {
+            i.get("musicResponsiveListItemRenderer").is_some()
+                || i.get("musicMultiRowListItemRenderer").is_some()
+        });
         let items = items_of(raw);
         if items.is_empty() {
             return Vec::new();
@@ -614,15 +728,7 @@ fn section(v: &Value, page: &mut Page) -> Vec<Shelf> {
         let mut shelves = Vec::new();
         for inner in array(r.get("contents")) {
             if let Some(m) = inner.get("messageRenderer") {
-                let message = [
-                    text(m.get("text")),
-                    text(at(m, &["subtext", "messageSubtextRenderer", "text"])),
-                ]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-                if !message.is_empty() {
+                if let Some(message) = message_text(m) {
                     page.message = Some(message);
                 }
             } else if let Some(i) = item(inner) {
@@ -650,10 +756,61 @@ fn section(v: &Value, page: &mut Page) -> Vec<Shelf> {
         }
         return Vec::new();
     }
-    if let Some(m) = v.get("messageRenderer") {
-        page.message = Some(text(m.get("text"))).filter(|s| !s.is_empty());
+    if let Some(m) = v.get("messageRenderer")
+        && let Some(message) = message_text(m)
+    {
+        page.message = Some(message);
     }
     Vec::new()
+}
+
+fn message_text(m: &Value) -> Option<String> {
+    let message = [
+        text(m.get("text")),
+        text(at(m, &["subtext", "messageSubtextRenderer", "text"])),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
+    (!message.is_empty()).then_some(message)
+}
+
+fn reload_token(v: Option<&Value>) -> Option<String> {
+    str_at(
+        v?,
+        &[
+            "browseSectionListReloadEndpoint",
+            "continuation",
+            "reloadContinuationData",
+            "continuation",
+        ],
+    )
+    .map(str::to_owned)
+}
+
+fn chip_menu(v: Option<&Value>) -> Vec<ChipOption> {
+    let Some(items) = v.and_then(|ep| {
+        at(
+            ep,
+            &["openPopupAction", "popup", "menuPopupRenderer", "items"],
+        )
+    }) else {
+        return Vec::new();
+    };
+    array(Some(items))
+        .iter()
+        .filter_map(|item| {
+            let m = item.get("menuNavigationItemRenderer")?;
+            let label = text(m.get("text"));
+            let reload = reload_token(m.get("navigationEndpoint"))?;
+            (!label.is_empty()).then_some(ChipOption {
+                text: label,
+                selected: str_at(m, &["icon", "iconType"]) == Some("CHECK"),
+                reload,
+            })
+        })
+        .collect()
 }
 
 fn chips(v: Option<&Value>) -> Vec<Chip> {
@@ -665,25 +822,19 @@ fn chips(v: Option<&Value>) -> Vec<Chip> {
         .iter()
         .filter_map(|c| {
             let c = c.get("chipCloudChipRenderer")?;
+            let nav = c.get("navigationEndpoint");
+            let deselect = c.get("onDeselectedCommand");
             Some(Chip {
                 text: text(c.get("text")),
-                target: c.get("navigationEndpoint").and_then(endpoint),
+                target: nav.and_then(endpoint),
                 selected: c
                     .get("isSelected")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                deselect: c.get("onDeselectedCommand").and_then(endpoint),
-                reload: str_at(
-                    c,
-                    &[
-                        "navigationEndpoint",
-                        "browseSectionListReloadEndpoint",
-                        "continuation",
-                        "reloadContinuationData",
-                        "continuation",
-                    ],
-                )
-                .map(str::to_owned),
+                deselect: deselect.and_then(endpoint),
+                reload: reload_token(nav),
+                deselect_reload: reload_token(deselect),
+                menu: chip_menu(nav),
             })
         })
         .filter(|c| !c.text.is_empty())
@@ -845,6 +996,23 @@ pub fn page(v: &Value) -> Page {
     }
     account_header(v, &mut page);
     fill_album_tracks(&mut page);
+    if let Some(show_id) = at(
+        v,
+        &[
+            "contents",
+            "twoColumnBrowseResultsRenderer",
+            "secondaryContents",
+            "sectionListRenderer",
+            "targetId",
+        ],
+    )
+    .and_then(Value::as_str)
+    .and_then(|id| id.strip_prefix("browse-feed"))
+    .filter(|id| id.starts_with("MPSP"))
+    {
+        let show_target = Target::browse(show_id);
+        fill_show_tracks(&page.header, &mut page.shelves, Some(&show_target));
+    }
     page
 }
 
@@ -878,29 +1046,71 @@ fn fill_album_tracks(page: &mut Page) {
     }
 }
 
+/// Podcast show rows omit the show name and creator; take them from the header.
+pub fn fill_show_tracks(header: &Option<Header>, shelves: &mut [Shelf], target: Option<&Target>) {
+    let Some(h) = header else { return };
+    let show = Run {
+        text: h.title.clone(),
+        target: target.cloned(),
+    };
+    let creators: Vec<Run> = h
+        .subtitle
+        .iter()
+        .filter(|r| !r.text.trim().is_empty() && r.text != " • ")
+        .cloned()
+        .collect();
+    let artists = if creators.is_empty() {
+        vec![show.clone()]
+    } else {
+        creators
+    };
+    for shelf in shelves {
+        for item in &mut shelf.items {
+            if let Some(track) = &mut item.track {
+                if track.artists.is_empty() {
+                    track.artists = artists.clone();
+                }
+                if track.album.is_none() {
+                    track.album = Some(show.clone());
+                }
+            }
+        }
+    }
+}
+
 /// What a continuation request returned.
 pub enum More {
     /// Further shelves for the page (Home).
     Shelves {
         shelves: Vec<Shelf>,
         next: Option<String>,
+        chips: Vec<Chip>,
+        message: Option<String>,
     },
     /// Further rows or cards for the shelf that asked.
     Items {
         items: Vec<Item>,
         next: Option<String>,
+        chips: Vec<Chip>,
+        message: Option<String>,
     },
 }
 
 pub fn more(v: &Value) -> More {
     if let Some(cc) = v.get("continuationContents") {
+        let mut reloaded_chips = Vec::new();
         if let Some(list) = cc.get("sectionListContinuation") {
             let mut page = Page::default();
             section_list(list, &mut page);
-            return More::Shelves {
-                shelves: page.shelves,
-                next: page.continuation,
-            };
+            if !page.shelves.is_empty() || list.get("contents").is_some() {
+                return More::Shelves {
+                    shelves: page.shelves,
+                    next: page.continuation,
+                    chips: page.chips,
+                    message: page.message,
+                };
+            }
+            reloaded_chips = page.chips;
         }
         for key in [
             "musicShelfContinuation",
@@ -909,17 +1119,32 @@ pub fn more(v: &Value) -> More {
         ] {
             if let Some(s) = cc.get(key) {
                 let raw = array(s.get("contents").or_else(|| s.get("items")));
+                let message = raw
+                    .iter()
+                    .find_map(|entry| entry.get("messageRenderer").and_then(message_text));
                 return More::Items {
                     items: items_of(raw),
                     next: continuation(s, raw),
+                    chips: reloaded_chips,
+                    message,
                 };
             }
+        }
+        if !reloaded_chips.is_empty() {
+            return More::Shelves {
+                shelves: Vec::new(),
+                next: None,
+                chips: reloaded_chips,
+                message: None,
+            };
         }
     }
     let raw = array(find(v, "continuationItems"));
     More::Items {
         items: items_of(raw),
         next: continuation(&Value::Null, raw),
+        chips: Vec::new(),
+        message: None,
     }
 }
 

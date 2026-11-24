@@ -28,16 +28,18 @@ pub enum LibraryTab {
     Songs,
     Albums,
     Artists,
+    Podcasts,
     /// What the account played, by day.
     History,
 }
 
 impl LibraryTab {
-    pub const ALL: [LibraryTab; 5] = [
+    pub const ALL: [LibraryTab; 6] = [
         LibraryTab::Playlists,
         LibraryTab::Songs,
         LibraryTab::Albums,
         LibraryTab::Artists,
+        LibraryTab::Podcasts,
         LibraryTab::History,
     ];
 
@@ -47,6 +49,7 @@ impl LibraryTab {
             LibraryTab::Songs => "Songs",
             LibraryTab::Albums => "Albums",
             LibraryTab::Artists => "Artists",
+            LibraryTab::Podcasts => "Podcasts",
             LibraryTab::History => "History",
         }
     }
@@ -57,6 +60,7 @@ impl LibraryTab {
             LibraryTab::Songs => "FEmusic_liked_videos",
             LibraryTab::Albums => "FEmusic_liked_albums",
             LibraryTab::Artists => "FEmusic_library_corpus_track_artists",
+            LibraryTab::Podcasts => "FEmusic_library_non_music_audio_list",
             LibraryTab::History => "FEmusic_history",
         })
     }
@@ -504,19 +508,58 @@ impl App {
                 let Some(page) = state.page.as_mut() else {
                     return;
                 };
-                // A chip's in-place reload (an artist's Albums / Singles & EPs).
+                // A chip's in-place reload (an artist's Albums / Singles & EPs,
+                // or a podcast show's sort/filter chips).
                 if shelf.is_none() && state.reload.as_ref().is_some_and(|(t, _)| *t == token) {
                     let chip = state.reload.take().map_or(0, |(_, chip)| chip);
                     state.more_loading.remove(&None);
+                    let show_target = matches!(
+                        &state.target,
+                        Target::Browse { id, .. } if id.starts_with("MPSP")
+                    )
+                    .then(|| state.target.clone());
                     match result {
-                        Ok(More::Shelves { shelves, next }) => {
+                        Ok(more) => {
+                            let (shelves, next, chips, message) = match more {
+                                More::Shelves {
+                                    shelves,
+                                    next,
+                                    chips,
+                                    message,
+                                } => (shelves, next, chips, message),
+                                More::Items {
+                                    items,
+                                    next,
+                                    chips,
+                                    message,
+                                } => {
+                                    let shelves = if items.is_empty() {
+                                        Vec::new()
+                                    } else {
+                                        vec![crate::model::Shelf {
+                                            title: String::new(),
+                                            strapline: None,
+                                            style: crate::model::ShelfStyle::List,
+                                            items,
+                                            more: None,
+                                            continuation: next,
+                                        }]
+                                    };
+                                    (shelves, None, chips, message)
+                                }
+                            };
                             page.shelves = shelves;
                             page.continuation = next;
-                            for (i, c) in page.chips.iter_mut().enumerate() {
-                                c.selected = i == chip;
+                            page.message = message;
+                            update_reloaded_chips(&mut page.chips, chips, chip);
+                            if let Some(target) = &show_target {
+                                crate::parse::fill_show_tracks(
+                                    &page.header,
+                                    &mut page.shelves,
+                                    Some(target),
+                                );
                             }
                         }
-                        Ok(More::Items { .. }) => {}
                         Err(error) => self.push_error(format!("Couldn't load that: {error}")),
                     }
                     return;
@@ -534,18 +577,35 @@ impl App {
                     return;
                 }
                 state.more_loading.remove(&shelf);
+                let show_target =
+                    matches!(&state.target, Target::Browse { id, .. } if id.starts_with("MPSP"))
+                        .then(|| state.target.clone());
                 match result {
-                    Ok(More::Shelves { shelves, next }) => {
+                    Ok(More::Shelves { shelves, next, .. }) => {
                         page.shelves.extend(shelves);
                         page.continuation = next;
+                        if let Some(target) = &show_target {
+                            crate::parse::fill_show_tracks(
+                                &page.header,
+                                &mut page.shelves,
+                                Some(target),
+                            );
+                        }
                     }
-                    Ok(More::Items { items, next }) => {
+                    Ok(More::Items { items, next, .. }) => {
                         match shelf.and_then(|i| page.shelves.get_mut(i)) {
                             Some(s) => {
                                 s.items.extend(items);
                                 s.continuation = next;
                             }
                             None => page.continuation = None,
+                        }
+                        if let Some(target) = &show_target {
+                            crate::parse::fill_show_tracks(
+                                &page.header,
+                                &mut page.shelves,
+                                Some(target),
+                            );
                         }
                     }
                     Err(error) => {
@@ -1277,6 +1337,20 @@ impl fastframe_shell::Resident for App {
         // way fastframe-shell ends it; dropping the backend repeats it harmlessly.
         log::info!("quitting");
         self.backend.shutdown();
+    }
+}
+
+fn update_reloaded_chips(
+    current: &mut Vec<crate::model::Chip>,
+    fresh: Vec<crate::model::Chip>,
+    chosen: usize,
+) {
+    if !fresh.is_empty() {
+        *current = fresh;
+    } else {
+        for (i, c) in current.iter_mut().enumerate() {
+            c.selected = i == chosen;
+        }
     }
 }
 

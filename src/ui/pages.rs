@@ -1,6 +1,6 @@
 use super::motion;
 use super::shelves::shelf_view;
-use super::widgets::{chip, chip_button, font, label, landing_cover, resting, runs_line};
+use super::widgets::{chip, chip_button, font, label, landing_cover, named, resting, runs_line};
 use super::{CARD, GAP};
 use crate::app::{Action, App, LibraryTab, PageState, View};
 use crate::icons::Icon;
@@ -191,7 +191,22 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
     if !page.chips.is_empty() {
         ui.horizontal_wrapped(|ui| {
             for (i, c) in page.chips.iter().enumerate() {
-                if chip(ui, &c.text, c.selected, p).clicked() {
+                if !c.menu.is_empty() {
+                    let response = chip_button(ui, &c.text, Some(Icon::ChevronDown), false, p);
+                    egui::Popup::menu(&response).width(180.0).show(|ui| {
+                        for opt in &c.menu {
+                            if named(ui.selectable_label(opt.selected, &opt.text), &opt.text)
+                                .clicked()
+                            {
+                                actions.push(Action::ReloadChip {
+                                    key: key.to_owned(),
+                                    chip: i,
+                                    token: opt.reload.clone(),
+                                });
+                            }
+                        }
+                    });
+                } else if chip(ui, &c.text, c.selected, p).clicked() {
                     chip_chosen(c, i, key, actions);
                 }
                 ui.add_space(4.0);
@@ -205,11 +220,15 @@ fn page_view(ui: &mut Ui, state: &PageState, key: &str, p: &Palette, actions: &m
         ui.add_space(12.0);
     }
     if page.shelves.is_empty() {
-        let message = page
-            .message
-            .clone()
-            .unwrap_or_else(|| "Nothing here yet.".into());
-        label(ui, message, 15.0, Weight::Regular, p.secondary);
+        if let Some(message) = &page.message {
+            label(ui, message, 15.0, Weight::Regular, p.secondary);
+        } else if page
+            .header
+            .as_ref()
+            .is_none_or(|h| h.play.is_none() || h.description.is_none())
+        {
+            label(ui, "Nothing here yet.", 15.0, Weight::Regular, p.secondary);
+        }
         return;
     }
     for (i, shelf) in page.shelves.iter().enumerate() {
@@ -244,7 +263,8 @@ fn header_skeleton(ui: &mut Ui, site: egui::Id, url: &str, p: &Palette) {
 }
 
 /// A chip chosen. A selected one goes back where it came from (a Home mood
-/// back to Home); another opens its page or swaps the shelves in place.
+/// back to Home, or a podcast filter chip back to unfiltered); another opens
+/// its page or swaps the shelves in place.
 fn chip_chosen(c: &Chip, i: usize, key: &str, actions: &mut Vec<Action>) {
     if c.selected {
         match &c.deselect {
@@ -252,7 +272,15 @@ fn chip_chosen(c: &Chip, i: usize, key: &str, actions: &mut Vec<Action>) {
                 actions.push(Action::Open(View::Home));
             }
             Some(target) => actions.push(Action::Activate(target.clone())),
-            None => {}
+            None => {
+                if let Some(token) = &c.deselect_reload {
+                    actions.push(Action::ReloadChip {
+                        key: key.to_owned(),
+                        chip: i,
+                        token: token.clone(),
+                    });
+                }
+            }
         }
     } else if let Some(token) = &c.reload {
         actions.push(Action::ReloadChip {
