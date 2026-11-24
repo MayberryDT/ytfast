@@ -28,9 +28,10 @@ Earlier YouTube Music players for Omarchy didn't look or feel like YouTube Music
 - Launching ytfast shows a normal native window within a second, laid out like YouTube Music: left navigation (Home, Explore, Library), a search field at the top, the content area, and a persistent player bar at the bottom.
 - **Home** shows the account's YouTube Music home shelves (e.g. Quick picks, Listen again, mixes and other personalised shelves) with cover art, in YouTube Music's order. Shelves scroll horizontally; more shelves load while scrolling down.
 - **Explore** shows new releases, charts, and moods & genres, each opening its page.
-- **Library** shows the account's playlists, songs, albums and artists (including Liked Music), switchable like YouTube Music's library chips.
+- **Library** shows the account's playlists, songs, albums, artists and podcasts (including Liked Music), switchable like YouTube Music's library chips.
 - **Search** gives suggestions while typing and results grouped like YouTube Music (top result, songs, albums, artists, playlists), with a per-type view.
 - **Album, artist and playlist pages** show header art and metadata, a Play/Shuffle action, and the full track list (long playlists load progressively). Artist pages show top songs, albums, singles and related artists.
+- **Podcasts** (Tyler, 2026-11-24): podcast show pages list their episodes with YouTube Music's sort and filter chips, and episodes play like songs. Home's Podcasts chip and Explore's podcast shelves show episode carousels. Audio only, like everything else.
 - Every row or card that represents music can be played directly, and every artist or album name in a row, the player bar or Now Playing opens its page.
 - The last loaded Home, Library and pages appear immediately from a local cache on the next launch and then refresh in place, so the app never opens to an empty or spinner-only screen.
 
@@ -108,7 +109,7 @@ ytfast keeps YouTube Music's map but has its own feel. Every moment answers inpu
 
 ## Exclusions
 
-Video playback; audio visualizers; downloads, offline mode or any on-disk audio cache; scrobbling and presence services; podcasts; uploads; macOS/Windows; AUR packaging and self-update; being signed in to more than one account at once; non-Chromium browsers' cookies.
+Video playback; audio visualizers; downloads, offline mode or any on-disk audio cache; scrobbling and presence services; uploads; macOS/Windows; AUR packaging and self-update; being signed in to more than one account at once; non-Chromium browsers' cookies.
 
 Native Linux binary releases are supported through [the release procedure](releases.md).
 The first public release is v0.1.0; package version, tag and assets follow the

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-11-24
+
+Change type: feature
+
+- Podcasts: show pages list their episodes with YouTube Music's sort (Latest,
+  Oldest, Popular) and filter (In progress, Unplayed, Played) chips; episodes
+  play like songs. Home's Podcasts chip and Explore show episode shelves,
+  Library has a Podcasts tab, and `music.youtube.com/podcast/…` links open the
+  show. From PR #4 by nate-eisner (fixes #3).
+- A song that can't be played now says so plainly ("Couldn't play …, skipped
+  it."), adding "If songs keep skipping, update yt-dlp." when yt-dlp's YouTube
+  extractor failed. yt-dlp's own error text moves behind the Copy button.
+- README: keep yt-dlp current. Distribution packages can lag behind YouTube
+  changes that break signed-in playback.
+
 ## 0.3.0 — 2026-10-26
 
 Change type: feature
