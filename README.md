@@ -111,6 +111,16 @@ install -Dm644 assets/ytfast.desktop ~/.local/share/applications/ytfast.desktop
 
 The release build takes several minutes and a few GB of memory. Logs go to `~/.cache/ytfast/ytfast.log`.
 
+### Keep yt-dlp current
+
+YouTube changes often, and yt-dlp releases fixes within days. Distribution packages can lag weeks behind. If songs skip with a message such as "The page needs to be reloaded" or "Requested format is not available", your yt-dlp is probably out of date. Install the [latest release](https://github.com/yt-dlp/yt-dlp/releases/latest) somewhere ahead of the packaged one on your `PATH` and update it with `yt-dlp -U`:
+
+```sh
+sudo curl -L -o /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+sudo chmod 755 /usr/local/bin/yt-dlp
+sudo yt-dlp -U   # later, to update
+```
+
 Published Linux archives are available in [GitHub Releases](https://github.com/MayberryDT/ytfast/releases).
 `v0.1.0` is the first release. See the [changelog](CHANGELOG.md) and
 [release procedure](docs/releases.md) for version policy and the repeatable

@@ -469,7 +469,7 @@ fn recovery() -> Vec<Step> {
         wait("waiting for the connection", 90.0, |a| {
             a.playback.index == Some(4)
                 && a.playback.loading
-                && a.errors.iter().any(|e| e.starts_with("No connection"))
+                && a.errors.iter().any(|e| e.text.starts_with("No connection"))
         }),
         Step::Sleep(6.0),
         measure(
@@ -1895,6 +1895,7 @@ fn idle(app: &App) -> bool {
 /// The app said YouTube Music refused an account change.
 fn refused(app: &App) -> bool {
     app.errors.iter().any(|e| {
+        let e = &e.text;
         e.contains("didn't accept it")
             || e.contains("Check the connection and try again")
             || e.contains("signed you out")

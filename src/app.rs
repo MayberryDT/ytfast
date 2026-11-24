@@ -185,6 +185,13 @@ pub enum Action {
     Control(crate::control::ControlAction),
 }
 
+/// An error on the error strip. Its Copy button copies `detail` too.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Notice {
+    pub text: String,
+    pub detail: Option<String>,
+}
+
 pub struct App {
     pub backend: Backend,
     pub palette: Palette,
@@ -237,7 +244,7 @@ pub struct App {
     pub recent_searches: Vec<String>,
     last_prepared: Option<String>,
     page_seq: u64,
-    pub errors: Vec<String>,
+    pub errors: Vec<Notice>,
     pub scroll_to_top: bool,
     pub started: Instant,
     /// How long the first frame took after launch.
@@ -576,6 +583,10 @@ impl App {
                 self.recent_searches.truncate(crate::searches::KEEP);
             }
             Event::Error(error) => self.push_error(error),
+            Event::Problem { text, detail } => self.push_notice(Notice {
+                text,
+                detail: Some(detail),
+            }),
             Event::Profiles { list, current } => {
                 self.profiles = list;
                 self.profile = current;
@@ -591,8 +602,15 @@ impl App {
     }
 
     pub fn push_error(&mut self, error: String) {
-        self.errors.retain(|e| *e != error);
-        self.errors.push(error);
+        self.push_notice(Notice {
+            text: error,
+            detail: None,
+        });
+    }
+
+    pub fn push_notice(&mut self, notice: Notice) {
+        self.errors.retain(|e| e.text != notice.text);
+        self.errors.push(notice);
         if self.errors.len() > 3 {
             self.errors.remove(0);
         }

@@ -632,9 +632,18 @@ impl super::Worker {
                     return;
                 }
                 if online {
-                    self.sink.send(Event::Error(format!(
-                        "Couldn't play “{title}”, skipped it. {error}"
-                    )));
+                    // yt-dlp's own words go behind Copy. Its extractor
+                    // failing for song after song usually means it is older
+                    // than YouTube's latest change.
+                    let hint = if error.contains("ERROR: [youtube]") {
+                        " If songs keep skipping, update yt-dlp."
+                    } else {
+                        ""
+                    };
+                    self.sink.send(Event::Problem {
+                        text: format!("Couldn't play “{title}”, skipped it.{hint}"),
+                        detail: error,
+                    });
                     self.next(true).await;
                 } else {
                     // Offline: don't skip through the queue; play this song when the connection returns.

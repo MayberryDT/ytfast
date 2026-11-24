@@ -441,7 +441,7 @@ pub(super) fn errors(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Acti
     let mut y = area.bottom() - 16.0;
     for (i, error) in app.errors.iter().enumerate().rev() {
         let galley = ui.painter().layout(
-            error.clone(),
+            error.text.clone(),
             font(Weight::Regular, 14.0),
             p.text,
             width - 120.0,
@@ -474,7 +474,11 @@ pub(super) fn errors(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Acti
                 .layout(Layout::left_to_right(Align::Min)),
         );
         if icon_button(&mut buttons, Icon::Copy, 16.0, p.secondary, p, "Copy").clicked() {
-            actions.push(Action::Copy(error.clone()));
+            let text = match &error.detail {
+                Some(detail) => format!("{}\n{detail}", error.text),
+                None => error.text.clone(),
+            };
+            actions.push(Action::Copy(text));
         }
         if icon_button(&mut buttons, Icon::Close, 16.0, p.secondary, p, "Dismiss").clicked() {
             actions.push(Action::DismissError(i));

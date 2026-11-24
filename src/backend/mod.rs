@@ -177,6 +177,11 @@ pub enum Event {
     Playback(Playback),
     /// A readable error for the error strip.
     Error(String),
+    /// A readable error whose technical detail goes behind its Copy button.
+    Problem {
+        text: String,
+        detail: String,
+    },
     /// The browser profiles signed in to YouTube, and the one in use.
     Profiles {
         list: Vec<crate::auth::Profile>,
